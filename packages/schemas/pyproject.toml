@@ -17,3 +17,7 @@ include = ["atlas_schemas*"]
 
 [tool.setuptools.package-data]
 atlas_schemas = ["py.typed"]
+
+[tool.mypy]
+python_executable = "../../.venv/bin/python"
+mypy_path = ["../../packages/schemas"]

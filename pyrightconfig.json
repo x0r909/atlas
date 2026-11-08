@@ -2,19 +2,24 @@
   "include": [
     "packages",
     "services",
-    "tests"
+    "tests",
+    "infra/db"
   ],
   "exclude": [
     "**/node_modules",
     "**/.venv",
-    "apps/terminal-web/.next"
+    "apps/terminal-web/.next",
+    "infra/db/versions/**/__pycache__"
   ],
   "pythonVersion": "3.12",
   "pythonPlatform": "Linux",
   "typeCheckingMode": "basic",
   "extraPaths": [
     "packages/common",
-    "packages/schemas"
+    "packages/schemas",
+    "services/execution",
+    "services/api-gateway",
+    "services/ingest-market"
   ],
   "reportMissingImports": "error",
   "reportMissingTypeStubs": "none",

@@ -54,9 +54,13 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S105", "S106", "S108"]        # fake secrets and tmp paths in tests
 "infra/db/versions/**" = ["E501", "I001"]    # generated migrations
+"services/api-gateway/atlas_api/app.py" = ["B008"]  # FastAPI dependencies are default args by design
 
 [tool.mypy]
 python_version = "3.12"
+# Resolve imports against the project venv, not whatever interpreter PATH mypy happens
+# to be installed under. Without this, a global mypy reports pydantic as missing.
+python_executable = ".venv/bin/python"
 warn_unused_configs = true
 warn_redundant_casts = true
 warn_unused_ignores = true
@@ -66,11 +70,21 @@ show_error_codes = true
 # Strict everywhere in the two packages that carry money and orders; the rest tightens later.
 # Service packages join this list when their code lands (M1+): mypy refuses a directory
 # that contains no Python yet, and an empty target would hide a real misconfiguration.
-files = ["packages", "tests"]
+files = ["packages", "services", "infra", "tools", "tests"]
+# Service packages are top-level distributions (`atlas_api`), not submodules of
+# `services/`, so every directory holding one must be an explicit import base.
+explicit_package_bases = true
+namespace_packages = true
 ignore_missing_imports = false
 # The workspace packages are importable from the tree (same paths pytest uses), so mypy
 # resolves `atlas_common.*` without an editable install.
-mypy_path = ["packages/common", "packages/schemas"]
+mypy_path = [
+ "packages/common",
+ "packages/schemas",
+ "services/api-gateway",
+ "services/execution",
+ "services/ingest-market",
+]
 
 [[tool.mypy.overrides]]
 module = ["packages.schemas.*", "atlas_schemas.*", "atlas_common.*"]
@@ -83,6 +97,11 @@ module = ["tests.*"]
 strict = false
 disallow_untyped_defs = false
 disallow_untyped_calls = false
+
+[[tool.mypy.overrides]]
+# asyncpg ships no py.typed marker; it is only used by the integration tests.
+module = ["asyncpg"]
+ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 # structlog is an optional extra of atlas-common; when it is not installed the module
@@ -107,7 +126,19 @@ ignore_errors = true
 minversion = "8.0"
 testpaths = ["tests"]
 # Packages are importable straight from the tree so a test run never needs an install step.
-pythonpath = ["packages/common", "packages/schemas", "."]
+pythonpath = [
+  "packages/common",
+  "packages/schemas",
+  "services/api-gateway",
+  "services/execution",
+  "services/ingest-market",
+  "services/ingest-news",
+  "services/feature-engine",
+  "services/risk-engine",
+  "services/stop-monitor",
+  "services/telegram-bot",
+  ".",
+]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = "-q --strict-markers --strict-config"
