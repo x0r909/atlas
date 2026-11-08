@@ -14,6 +14,7 @@ from atlas_api.auth import (
     CONFIRM_TTL_SECONDS,
     LOCKOUT_FAILURES,
     SESSION_IDLE_SECONDS,
+    TOTP_STEP_SECONDS,
     AuthError,
     AuthService,
     OperatorRecord,
@@ -138,6 +139,39 @@ async def test_the_same_totp_window_cannot_be_used_twice(auth, clock):
     with pytest.raises(AuthError) as excinfo:
         await auth.login("augie", PASSWORD, totp_at(clock))
     assert excinfo.value.code == "AUTH_FAILED"
+
+
+async def test_a_wrong_password_does_not_spend_the_totp_window(auth, clock):
+    code = totp_at(clock)
+    with pytest.raises(AuthError):
+        await auth.login("augie", "wrong password here", code)
+    # The code was never checked against the operator, so it must still be usable.
+    await auth.login("augie", PASSWORD, code)
+
+
+async def test_a_code_cannot_be_reused_across_a_step_boundary(auth, clock):
+    code = totp_at(clock)
+    await auth.login("augie", PASSWORD, code)
+    # One step later the code is still inside valid_window, which is exactly the replay
+    # a per-window key would miss.
+    clock.advance(TOTP_STEP_SECONDS)
+    with pytest.raises(AuthError) as excinfo:
+        await auth.login("augie", PASSWORD, code)
+    assert excinfo.value.code == "AUTH_FAILED"
+
+
+async def test_the_failure_counter_decides_not_a_stale_read(auth, clock, store):
+    async def stale(key: str) -> int:
+        return 0
+
+    store.counter = stale  # type: ignore[method-assign]
+    for _ in range(LOCKOUT_FAILURES):
+        with pytest.raises(AuthError) as excinfo:
+            await auth.login("augie", "wrong password here", "000000")
+        assert excinfo.value.code == "AUTH_FAILED"
+    with pytest.raises(AuthError) as excinfo:
+        await auth.login("augie", "wrong password here", "000000")
+    assert excinfo.value.code == "AUTH_LOCKED"
 
 
 async def test_repeated_failures_lock_the_account(auth, clock):

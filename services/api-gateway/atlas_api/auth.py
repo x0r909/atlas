@@ -9,13 +9,13 @@ Nothing here knows about FastAPI; routes call ``AuthService`` and translate erro
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import hmac
 import json
 import secrets
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any, Protocol
 
 import pyotp
@@ -102,6 +102,28 @@ def verify_password(password: str, encoded: str) -> bool:
     return hmac.compare_digest(digest.hex(), digest_hex)
 
 
+@functools.lru_cache(maxsize=1)
+def _dummy_password_hash() -> str:
+    """Verified against when the username is unknown, so both paths cost one scrypt run."""
+    return hash_password(secrets.token_urlsafe(24))
+
+
+def _passkey_matches(credentials: tuple[str, ...], assertion: str) -> bool:
+    """Constant-time membership. The full WebAuthn assertion check lands with the ceremony
+    endpoints; until then a static secret is the weakest part and is kept out of any
+    comparison whose timing could leak it."""
+    presented = hashlib.sha256(assertion.encode()).digest()
+    return any(
+        hmac.compare_digest(hashlib.sha256(item.encode()).digest(), presented)
+        for item in credentials
+    )
+
+
+def _user_key(username: str) -> str:
+    """Usernames index Redis keys, so hash them: no separators, no unbounded fragments."""
+    return hashlib.sha256(username.encode()).hexdigest()[:32]
+
+
 def _key_bytes(key: str | bytes) -> bytes:
     return key.encode() if isinstance(key, str) else key
 
@@ -173,25 +195,34 @@ class AuthService:
         passkey_assertion: str | None = None,
     ) -> Session:
         now = int(self._clock())
-        await self._refuse_while_locked(username)
+        await self._check_lockout(username)
 
         operator = await self._lookup(username)
-        password_ok = operator is not None and verify_password(password, operator.password_hash)
-        totp_ok = operator is not None and await self._consume_totp(operator, totp_code, now)
-        passkey_ok = (
-            passkey_assertion is not None
-            and operator is not None
-            and passkey_assertion in operator.passkey_credentials
-            and await self._store.add_once(f"atlas:pk:{username}:{passkey_assertion}", 300)
+        # Always pay for a hash and a TOTP computation, so an unknown username is not
+        # measurably cheaper than a wrong password.
+        password_ok = verify_password(
+            password, operator.password_hash if operator is not None else _dummy_password_hash()
         )
-
-        # TOTP is mandatory; a passkey, when presented, must also be valid.
-        if not (password_ok and totp_ok and (passkey_assertion is None or passkey_ok)):
+        if operator is None or not password_ok:
             await self._record_failure(username)
             raise AuthError("AUTH_FAILED", "invalid credentials")
+        # Only now may the code be spent: otherwise anyone could burn the operator's window.
+        if not await self._consume_totp(operator, totp_code, now):
+            await self._record_failure(username)
+            raise AuthError("AUTH_FAILED", "invalid credentials")
+        passkey_ok = False
+        if passkey_assertion is not None:
+            passkey_ok = _passkey_matches(operator.passkey_credentials, passkey_assertion) and (
+                await self._store.add_once(
+                    f"atlas:pk:{_user_key(username)}:{hashlib.sha256(passkey_assertion.encode()).hexdigest()[:16]}",
+                    300,
+                )
+            )
+            if not passkey_ok:
+                await self._record_failure(username)
+                raise AuthError("AUTH_FAILED", "invalid credentials")
 
-        await self._store.delete(f"atlas:fail:{username}")
-        await self._store.delete(f"atlas:failcount:{username}")
+        await self._store.delete(f"atlas:failcount:{_user_key(username)}")
         session_id = secrets.token_urlsafe(32)
         session = Session(
             session_id=session_id,
@@ -268,19 +299,30 @@ class AuthService:
             raise AuthError("CONFIRM_REPLAYED", "confirmation token was already used")
 
     async def _consume_totp(self, operator: OperatorRecord, code: str, now: int) -> bool:
-        totp = pyotp.TOTP(operator.totp_secret)
-        if not totp.verify(code, for_time=datetime.fromtimestamp(now, UTC), valid_window=1):
-            return False
-        counter = now // TOTP_STEP_SECONDS
-        # The same 30 s window may not be used twice, even with a different session.
-        return await self._store.add_once(
-            f"atlas:totp:{operator.username}:{counter}", TOTP_STEP_SECONDS * 3
-        )
+        """Burn the step the code actually belongs to, not the step the clock is in.
 
-    async def _refuse_while_locked(self, username: str) -> None:
-        # Read-only: counting an attempt here would let five real failures plus one
-        # correct login still trip the lock, locking the operator out of their own account.
-        attempts = await self._store.counter(f"atlas:failcount:{username}")
+        Within valid_window a request straddling a 30 s boundary can present a code from
+        the previous step; keying single-use on `now // 30` would then let the same code
+        be accepted twice. Burning every step the code matches closes that.
+        """
+        totp = pyotp.TOTP(operator.totp_secret)
+        counter = now // TOTP_STEP_SECONDS
+        matched = [
+            step
+            for step in (counter - 1, counter, counter + 1)
+            if hmac.compare_digest(totp.at(step * TOTP_STEP_SECONDS), code)
+        ]
+        if not matched:
+            return False
+        for step in matched:
+            if not await self._store.add_once(
+                f"atlas:totp:{_user_key(operator.username)}:{step}", TOTP_STEP_SECONDS * 3
+            ):
+                return False
+        return True
+
+    async def _check_lockout(self, username: str) -> None:
+        attempts = await self._store.counter(f"atlas:failcount:{_user_key(username)}")
         if attempts >= LOCKOUT_FAILURES:
             raise AuthError(
                 "AUTH_LOCKED",
@@ -289,7 +331,15 @@ class AuthService:
             )
 
     async def _record_failure(self, username: str) -> None:
-        await self._store.incr(f"atlas:failcount:{username}", LOCKOUT_SECONDS)
+        # The increment is the authority, not a read followed by a write: otherwise
+        # parallel attempts all pass the check before any of them counts.
+        attempts = await self._store.incr(f"atlas:failcount:{_user_key(username)}", LOCKOUT_SECONDS)
+        if attempts > LOCKOUT_FAILURES:
+            raise AuthError(
+                "AUTH_LOCKED",
+                "too many failed attempts; try again later",
+                retry_after_s=LOCKOUT_SECONDS,
+            )
 
     @staticmethod
     def _encode(session: Session) -> str:
@@ -309,13 +359,16 @@ class AuthService:
             data: dict[str, Any] = json.loads(raw)
         except json.JSONDecodeError as exc:  # a corrupt value must not become a session
             raise AuthError("AUTH_REQUIRED", "session record is unreadable") from exc
-        return Session(
-            session_id=session_id,
-            username=str(data["u"]),
-            issued_at=int(data["iat"]),
-            last_seen_at=int(data["seen"]),
-            passkey_used=bool(data["pk"]),
-        )
+        try:
+            return Session(
+                session_id=session_id,
+                username=str(data["u"]),
+                issued_at=int(data["iat"]),
+                last_seen_at=int(data["seen"]),
+                passkey_used=bool(data["pk"]),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise AuthError("AUTH_REQUIRED", "session record is unreadable") from exc
 
 
 class OperatorLookup(Protocol):
