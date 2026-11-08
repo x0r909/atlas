@@ -1,0 +1,68 @@
+# --- Secrets & local config -------------------------------------------------
+# Decrypted at deploy time by sops/age; the encrypted files are committed,
+# anything derived from them never is.
+.env
+.env.*
+!.env.example
+/run/atlas/
+secrets/
+*.age
+age.key
+*.decrypted.*
+*.pem
+*.p12
+*.pfx
+
+# --- Python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.egg-info/
+dist/
+build/
+
+# --- Node / Next.js -------------------------------------------------------
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+playwright-report/
+test-results/
+
+# --- Runtime state & data -------------------------------------------------
+infra/compose/pgdata/
+pgdata/
+data/
+logs/
+tmp/
+*.log
+*.sqlite3
+*.duckdb
+*.parquet
+
+# --- Editor & OS ----------------------------------------------------------
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# --- Agent / tooling state ------------------------------------------------
+# Pi keeps machine-local session state; its skill cache is a build artifact.
+.pi/sessions/
+.pi/cache/
+.pi/state/
+.pi/auth*
+.atl/
