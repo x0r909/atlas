@@ -162,6 +162,11 @@ class Hub:
     def publish(self, event_type: str, payload: dict[str, Any]) -> int:
         delivered = 0
         for subscriber in tuple(self._subscribers):
+            # A client dropped for backpressure closes itself; keeping it in the set would
+            # grow the fan-out forever and count a delivery nobody received.
+            if subscriber.closed:
+                self._subscribers.discard(subscriber)
+                continue
             if subscriber.accepts(event_type):
                 subscriber.offer(event_type, payload)
                 delivered += 1

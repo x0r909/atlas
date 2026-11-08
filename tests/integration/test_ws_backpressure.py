@@ -107,6 +107,17 @@ def test_slow_client_is_closed_and_ticks_still_flow() -> None:
         assert subscriber.dropped_ticks > 0
 
 
+def test_a_dropped_client_leaves_the_fan_out() -> None:
+    hub = Hub()
+    subscriber = Subscriber(topics=frozenset({"market"}), queue=asyncio.Queue(maxsize=1))
+    hub.register(subscriber)
+    hub.publish("market.bar", {"pair": "BTCIDR"})
+    hub.publish("market.bar", {"pair": "BTCIDR"})
+    assert subscriber.closed is True
+    hub.publish("market.bar", {"pair": "BTCIDR"})
+    assert hub.size == 0
+
+
 def test_subscribe_is_mandatory_and_unknown_topics_refuse() -> None:
     app = FastAPI()
 
