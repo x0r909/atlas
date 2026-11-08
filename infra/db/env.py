@@ -13,6 +13,7 @@ import os
 from logging.config import fileConfig
 
 from alembic import context
+from atlas_common.dsn import to_async_dsn
 from sqlalchemy import Connection, pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
@@ -31,7 +32,7 @@ def _database_url() -> str:
             "ATLAS_DB_DSN is not set. Export it before running alembic; the URL is never "
             "read from alembic.ini so a migration cannot target an unintended database."
         )
-    return url
+    return to_async_dsn(url)
 
 
 def run_migrations_offline() -> None:
