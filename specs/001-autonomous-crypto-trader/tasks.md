@@ -37,20 +37,20 @@ Monorepo per [plan.md](./plan.md) § Project Structure: `services/<name>/`, `app
 
 **Purpose**: A buildable, lintable, deployable skeleton before any domain code.
 
-- [ ] T001 Create the monorepo tree from plan.md (`services/`, `apps/terminal-web/`, `packages/{schemas,common}/`, `infra/{compose,db,observability,secrets,vps}/`, `docs/{adr,runbooks,operator}/`, `tests/{contract,integration,chaos,unit,fixtures}/`)
-- [ ] T002 [P] Create root `pyproject.toml` with ruff, mypy strict for `packages/schemas`, `services/risk-engine`, `services/execution`, pytest + pytest-asyncio + respx + time-machine + Hypothesis
-- [ ] T003 [P] Initialize `packages/schemas/pyproject.toml` and `packages/common/pyproject.toml` as installable workspace packages with pydantic v2
-- [ ] T004 [P] Scaffold `apps/terminal-web/` (Next.js 15 App Router, TypeScript strict, Tailwind 4, no state/data library per plan.md)
-- [ ] T005 [P] Add `.github/workflows/ci.yml`: ruff, mypy, pytest, `pip-audit`, `gitleaks`, and a `markdownlint` job over `specs/**`
-- [ ] T006 [P] Write `infra/compose/docker-compose.yml` with the nine services, `postgres:16` + TimescaleDB + pgvector, Redis 7 (`maxmemory 384mb`, `maxmemory-policy noeviction`), and `ATLAS_MODE=PAPER` as the shipped default
-- [ ] T007 [P] Initialize Alembic in `infra/db/` with async env and a `versions/` skeleton
-- [ ] T008 [P] Define the sops+age layout in `infra/secrets/` (encrypted `paper.env`, `live.env.template`), document `/etc/atlas/age.key` (0600) and the tmpfs decrypt target `/run/atlas/*.env`
-- [ ] T009 [P] Write `infra/vps/bootstrap.sh` (Ubuntu 24.04, chrony mandatory, Tailscale only ingress, static IPv4 requirement, systemd units, nightly `pg_dump` off-box)
-- [ ] T010 [P] Implement `packages/common/atlas_common/logging.py`: structlog JSON to journald with a redaction filter for API keys, HMAC key, TOTP seed, and env dumps, plus `tests/unit/test_logging_redaction.py` asserting a secret never reaches the log stream (FR-040)
-- [ ] T011 [P] Implement `packages/common/atlas_common/money.py` (IDR `Decimal` rounding, `floor_to_step`, `tick_round`, fee/tax helpers) with `tests/unit/test_money.py`, including a `floor_to_step` property test that never rounds up
-- [ ] T012 [P] Implement `packages/common/atlas_common/clock.py` (injected clock, Asia/Jakarta day boundary, monotonic heartbeat timestamps) with `tests/unit/test_clock.py` covering the 00:00 WIB rollover
-- [ ] T012a [P] Write `tests/unit/test_mode_default.py` failing first (FR-002, SC-012): unset `ATLAS_MODE` ⇒ `PAPER`; `ATLAS_MODE=PAPR` ⇒ the service refuses to start with `MODE_UNKNOWN` and never falls back to a Live mode; a missing or unreadable `mode_state` row ⇒ `PAPER`; and no configuration path maps an invalid value to Co-pilot or Autonomous
-- [ ] T012b Implement `packages/common/atlas_common/config.py` mode resolution to pass T012a (unset/invalid/missing ⇒ `PAPER`, unknown env value ⇒ refuse to start) and wire it into the service bootstrap used by every service
+- [X] T001 Create the monorepo tree from plan.md (`services/`, `apps/terminal-web/`, `packages/{schemas,common}/`, `infra/{compose,db,observability,secrets,vps}/`, `docs/{adr,runbooks,operator}/`, `tests/{contract,integration,chaos,unit,fixtures}/`)
+- [X] T002 [P] Create root `pyproject.toml` with ruff, mypy strict for `packages/schemas`, `services/risk-engine`, `services/execution`, pytest + pytest-asyncio + respx + time-machine + Hypothesis
+- [X] T003 [P] Initialize `packages/schemas/pyproject.toml` and `packages/common/pyproject.toml` as installable workspace packages with pydantic v2
+- [X] T004 [P] Scaffold `apps/terminal-web/` (Next.js 15 App Router, TypeScript strict, Tailwind 4, no state/data library per plan.md) (built on Tailwind 4.3.5)
+- [X] T005 [P] Add `.github/workflows/ci.yml`: ruff, mypy, pytest, `pip-audit`, `gitleaks`, and a `markdownlint` job over `specs/**` (docs job lints the repo's own prose; `specs/**` is owned by the Spec Kit templates)
+- [X] T006 [P] Write `infra/compose/docker-compose.yml` with the nine services, `postgres:16` + TimescaleDB + pgvector, Redis 7 (`maxmemory 384mb`, `maxmemory-policy noeviction`), and `ATLAS_MODE=PAPER` as the shipped default (built on `timescale/timescaledb-ha:pg16`, which bundles pgvector)
+- [X] T007 [P] Initialize Alembic in `infra/db/` with async env and a `versions/` skeleton
+- [X] T008 [P] Define the sops+age layout in `infra/secrets/` (encrypted `paper.env`, `live.env.template`), document `/etc/atlas/age.key` (0600) and the tmpfs decrypt target `/run/atlas/*.env` (as built: layout lives in `infra/age/` with templates inline in its README and `scripts/render-credentials.sh`)
+- [X] T009 [P] Write `infra/vps/bootstrap.sh` (Ubuntu 24.04, chrony mandatory, Tailscale only ingress, static IPv4 requirement, systemd units, nightly `pg_dump` off-box) (plus `infra/vps/backup.sh` and `atlas-backup.timer` for the nightly off-box dump)
+- [X] T010 [P] Implement `packages/common/atlas_common/logging.py`: structlog JSON to journald with a redaction filter for API keys, HMAC key, TOTP seed, and env dumps, plus `tests/unit/test_logging_redaction.py` asserting a secret never reaches the log stream (FR-040)
+- [X] T011 [P] Implement `packages/common/atlas_common/money.py` (IDR `Decimal` rounding, `floor_to_step`, `tick_round`, fee/tax helpers) with `tests/unit/test_money.py`, including a `floor_to_step` property test that never rounds up
+- [X] T012 [P] Implement `packages/common/atlas_common/clock.py` (injected clock, Asia/Jakarta day boundary, monotonic heartbeat timestamps) with `tests/unit/test_clock.py` covering the 00:00 WIB rollover
+- [X] T012a [P] Write `tests/unit/test_mode_default.py` failing first (FR-002, SC-012): unset `ATLAS_MODE` ⇒ `PAPER`; `ATLAS_MODE=PAPR` ⇒ the service refuses to start with `MODE_UNKNOWN` and never falls back to a Live mode; a missing or unreadable `mode_state` row ⇒ `PAPER`; and no configuration path maps an invalid value to Co-pilot or Autonomous
+- [X] T012b Implement `packages/common/atlas_common/config.py` mode resolution to pass T012a (unset/invalid/missing ⇒ `PAPER`, unknown env value ⇒ refuse to start) and wire it into the service bootstrap used by every service
 
 ---
 

@@ -13,7 +13,7 @@ dilangkangi oleh siapa pun, termasuk oleh LLM-nya sendiri.
 Bukan angka opsional — ini yang membuat arsitekturnya terlihat seperti sekarang.
 
 | Batasan | Nilai | Konsekuensi |
-|---|---|---|
+| --- | --- | --- |
 | Modal total | Rp100.000 | posisi kecil, stop distance sempit |
 | Minimum order Indodax | Rp10.000 | ≤5 posisi bersamaan, tidak ada averaging |
 | Biaya LLM | ≤ Rp5.000/hari | ≤6k token input per siklus |
