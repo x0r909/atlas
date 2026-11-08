@@ -153,7 +153,8 @@ def create_app(*, auth: AuthService, repo: Repo) -> FastAPI:
         }
 
     @app.get("/mode")
-    async def get_mode(request: Request) -> Any:
+    async def get_mode(request: Request, session: Session = Depends(session_of)) -> Any:
+        _ = session
         repo_: Repo = request.app.state.repo
         current = await repo_.current_mode()
         history = await repo_.mode_history(20)
@@ -170,30 +171,44 @@ def create_app(*, auth: AuthService, repo: Repo) -> FastAPI:
         if mode not in {"PAPER", "CO_PILOT", "AUTONOMOUS", "HALTED"}:
             raise HTTPException(status_code=422, detail="mode is not a known stage")
         cap = body.get("capital_cap_idr")
+        reason = str(body.get("reason_code", "OPERATOR_PROMOTION"))
+        cap_value = _decimal(cap, "capital_cap_idr") if cap is not None else None
+        if mode == "CO_PILOT" and cap_value is None:
+            raise HTTPException(status_code=422, detail="CO_PILOT requires capital_cap_idr")
         try:
             appended = await repo_.append_mode(
                 mode=mode,
-                reason_code=str(body.get("reason_code", "OPERATOR_PROMOTION")),
-                actor=f"operator:{session.username}",
+                reason_code=reason,
+                actor="OPERATOR",
+                actor_ref=session.username,
                 evidence_ref=body.get("evidence_ref"),
-                capital_cap_idr=_decimal(cap, "capital_cap_idr") if cap is not None else None,
+                capital_cap_idr=cap_value,
             )
         except Exception as exc:  # database guard rejects illegal transitions
             return _error(409, "MODE_TRANSITION_REFUSED", str(exc))
         return appended
 
     @app.get("/positions")
-    async def get_positions(request: Request, status: str | None = None) -> Any:
+    async def get_positions(
+        request: Request, status: str | None = None, session: Session = Depends(session_of)
+    ) -> Any:
+        _ = session
         repo_: Repo = request.app.state.repo
         return {"positions": serialize_positions(await repo_.positions(status))}
 
     @app.post("/positions/{position_id}/close")
-    async def close_position(request: Request, position_id: str) -> Any:
+    async def close_position(
+        request: Request, position_id: str, session: Session = Depends(session_of)
+    ) -> Any:
+        _ = (request, session)
         _uuid(position_id, "position_id")
         return {"accepted": True, "position_id": position_id, "action": "CLOSE"}
 
     @app.put("/positions/{position_id}/stop")
-    async def move_stop(request: Request, position_id: str) -> Any:
+    async def move_stop(
+        request: Request, position_id: str, session: Session = Depends(session_of)
+    ) -> Any:
+        _ = session
         repo_: Repo = request.app.state.repo
         _uuid(position_id, "position_id")
         body = await request.json()
@@ -205,13 +220,18 @@ def create_app(*, auth: AuthService, repo: Repo) -> FastAPI:
 
     @app.get("/orders")
     async def get_orders(
-        request: Request, status: str | None = None, since: int | None = None
+        request: Request,
+        status: str | None = None,
+        since: int | None = None,
+        session: Session = Depends(session_of),
     ) -> Any:
+        _ = session
         repo_: Repo = request.app.state.repo
         return {"orders": await repo_.orders(status, since)}
 
     @app.get("/market/pairs")
-    async def get_pairs(request: Request) -> Any:
+    async def get_pairs(request: Request, session: Session = Depends(session_of)) -> Any:
+        _ = session
         repo_: Repo = request.app.state.repo
         return {"pairs": await repo_.pairs()}
 
@@ -258,7 +278,9 @@ def create_app(*, auth: AuthService, repo: Repo) -> FastAPI:
         since: int | None = None,
         pair: str | None = None,
         limit: int = Query(default=50, ge=1, le=200),
+        session: Session = Depends(session_of),
     ) -> Any:
+        _ = session
         repo_: Repo = request.app.state.repo
         return {"items": await repo_.news(since, pair, limit)}
 
@@ -268,12 +290,20 @@ def create_app(*, auth: AuthService, repo: Repo) -> FastAPI:
         from_: int | None = Query(default=None, alias="from"),
         to: int | None = None,
         outcome: str | None = None,
+        session: Session = Depends(session_of),
     ) -> Any:
+        _ = session
         repo_: Repo = request.app.state.repo
         return {"cycles": await repo_.decisions(from_, to, outcome, 100)}
 
     @app.get("/decisions/{cycle_id}")
-    async def get_decision(request: Request, cycle_id: str, format: str = "json") -> Any:
+    async def get_decision(
+        request: Request,
+        cycle_id: str,
+        format: str = "json",
+        session: Session = Depends(session_of),
+    ) -> Any:
+        _ = session
         repo_: Repo = request.app.state.repo
         cycle = await repo_.decision(_uuid(cycle_id, "cycle_id"))
         if cycle is None:
@@ -291,7 +321,10 @@ def create_app(*, auth: AuthService, repo: Repo) -> FastAPI:
         return cycle
 
     @app.get("/incidents")
-    async def get_incidents(request: Request, state: str | None = "open") -> Any:
+    async def get_incidents(
+        request: Request, state: str | None = "open", session: Session = Depends(session_of)
+    ) -> Any:
+        _ = session
         repo_: Repo = request.app.state.repo
         return {"incidents": await repo_.incidents(state)}
 
@@ -315,7 +348,8 @@ def create_app(*, auth: AuthService, repo: Repo) -> FastAPI:
         appended = await repo_.append_mode(
             mode="HALTED",
             reason_code="KILL_SWITCH",
-            actor=f"operator:{session.username}",
+            actor="OPERATOR",
+            actor_ref=session.username,
             evidence_ref=None,
             capital_cap_idr=None,
         )
@@ -328,13 +362,18 @@ def create_app(*, auth: AuthService, repo: Repo) -> FastAPI:
         mode = str(body.get("mode", "PAPER")).upper()
         if mode not in {"PAPER", "CO_PILOT"}:
             raise HTTPException(status_code=422, detail="a halt lifts only into PAPER or CO_PILOT")
+        cap = body.get("capital_cap_idr")
+        cap_value = _decimal(cap, "capital_cap_idr") if cap is not None else None
+        if mode == "CO_PILOT" and cap_value is None:
+            raise HTTPException(status_code=422, detail="CO_PILOT requires capital_cap_idr")
         try:
             appended = await repo_.append_mode(
                 mode=mode,
-                reason_code=str(body.get("reason_code", "HALT_LIFTED")),
-                actor=f"operator:{session.username}",
+                reason_code=str(body.get("reason_code", "RECOVERY")),
+                actor="OPERATOR",
+                actor_ref=session.username,
                 evidence_ref=body.get("evidence_ref"),
-                capital_cap_idr=None,
+                capital_cap_idr=cap_value,
             )
         except Exception as exc:
             return _error(409, "MODE_TRANSITION_REFUSED", str(exc))

@@ -58,6 +58,7 @@ class Repo(Protocol):
         mode: str,
         reason_code: str,
         actor: str,
+        actor_ref: str | None,
         evidence_ref: str | None,
         capital_cap_idr: Decimal | None,
     ) -> dict[str, Any]: ...
@@ -109,8 +110,8 @@ class AsyncpgRepo:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                SELECT mode, reason_code, capital_cap_idr, actor, created_at
-                FROM mode_state ORDER BY created_at DESC, id DESC LIMIT 1
+                SELECT mode, reason_code, capital_cap_idr, actor, actor_ref, created_at
+                FROM mode_state ORDER BY seq DESC LIMIT 1
                 """
             )
         if row is None:
@@ -120,6 +121,7 @@ class AsyncpgRepo:
             "reason_code": row["reason_code"],
             "capital_cap_idr": str(row["capital_cap_idr"]) if row["capital_cap_idr"] else None,
             "actor": row["actor"],
+            "actor_ref": row["actor_ref"],
             "since_ms": _ms(row["created_at"]),
         }
 
@@ -127,9 +129,9 @@ class AsyncpgRepo:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT mode, previous_mode, reason_code, capital_cap_idr, actor, evidence_ref,
-                       created_at
-                FROM mode_state ORDER BY created_at DESC, id DESC LIMIT $1
+                SELECT mode, previous_mode, reason_code, capital_cap_idr, actor, actor_ref,
+                       evidence_ref, created_at
+                FROM mode_state ORDER BY seq DESC LIMIT $1
                 """,
                 limit,
             )
@@ -140,6 +142,7 @@ class AsyncpgRepo:
                 "reason_code": row["reason_code"],
                 "capital_cap_idr": str(row["capital_cap_idr"]) if row["capital_cap_idr"] else None,
                 "actor": row["actor"],
+                "actor_ref": row["actor_ref"],
                 "evidence_ref": row["evidence_ref"],
                 "created_at_ms": _ms(row["created_at"]),
             }
@@ -152,26 +155,39 @@ class AsyncpgRepo:
         mode: str,
         reason_code: str,
         actor: str,
+        actor_ref: str | None,
         evidence_ref: str | None,
         capital_cap_idr: Decimal | None,
     ) -> dict[str, Any]:
         async with self._pool.acquire() as conn:
+            # previous_mode and prev_seq come from the row being superseded, never from the
+            # caller: the guard compares them to the head it read under its own lock, and
+            # the unique prev_seq turns a lost race into a 409 instead of a fork.
             row = await conn.fetchrow(
                 """
-                INSERT INTO mode_state (mode, reason_code, actor, evidence_ref, capital_cap_idr)
-                VALUES ($1, $2, $3, $4, $5)
-                RETURNING mode, reason_code, actor, capital_cap_idr, created_at
+                INSERT INTO mode_state
+                    (mode, previous_mode, prev_seq, reason_code, actor, actor_ref,
+                     evidence_ref, capital_cap_idr)
+                SELECT $1, head.mode, head.seq, $2, $3, $4, $5, $6
+                FROM mode_state AS head
+                ORDER BY head.seq DESC
+                LIMIT 1
+                RETURNING mode, reason_code, actor, actor_ref, capital_cap_idr, created_at
                 """,
                 mode,
                 reason_code,
                 actor,
+                actor_ref,
                 evidence_ref,
                 capital_cap_idr,
             )
+        if row is None:
+            raise RuntimeError("mode_state has no head row to extend")
         return {
             "mode": row["mode"],
             "reason_code": row["reason_code"],
             "actor": row["actor"],
+            "actor_ref": row["actor_ref"],
             "capital_cap_idr": str(row["capital_cap_idr"]) if row["capital_cap_idr"] else None,
             "since_ms": _ms(row["created_at"]),
         }
@@ -188,6 +204,8 @@ class AsyncpgRepo:
             args.append(status.upper())
         query += " ORDER BY p.opened_at DESC LIMIT 200"
         async with self._pool.acquire() as conn:
+            # nosemgrep: python.lang.security.audit.sqli.asyncpg-sqli.asyncpg-sqli
+            # clauses only append $N placeholders; every value travels in args
             rows = await conn.fetch(query, *args)
         return [
             PositionView(
@@ -224,6 +242,8 @@ class AsyncpgRepo:
             query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY created_at DESC LIMIT 200"
         async with self._pool.acquire() as conn:
+            # nosemgrep: python.lang.security.audit.sqli.asyncpg-sqli.asyncpg-sqli
+            # clauses only append $N placeholders; every value travels in args
             rows = await conn.fetch(query, *args)
         return [
             {
@@ -330,6 +350,8 @@ class AsyncpgRepo:
             query += " WHERE " + " AND ".join(clauses)
         query += f" ORDER BY started_at DESC LIMIT ${len(args)}"
         async with self._pool.acquire() as conn:
+            # nosemgrep: python.lang.security.audit.sqli.asyncpg-sqli.asyncpg-sqli
+            # clauses only append $N placeholders; every value travels in args
             rows = await conn.fetch(query, *args)
         return [
             {
@@ -375,6 +397,8 @@ class AsyncpgRepo:
             query += " WHERE state = $1"
         query += " ORDER BY opened_at DESC LIMIT 100"
         async with self._pool.acquire() as conn:
+            # nosemgrep: python.lang.security.audit.sqli.asyncpg-sqli.asyncpg-sqli
+            # clauses only append $N placeholders; every value travels in args
             rows = await conn.fetch(query, *args)
         return [
             {
@@ -416,6 +440,8 @@ class AsyncpgRepo:
             query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY seq DESC LIMIT 500"
         async with self._pool.acquire() as conn:
+            # nosemgrep: python.lang.security.audit.sqli.asyncpg-sqli.asyncpg-sqli
+            # clauses only append $N placeholders; every value travels in args
             rows = await conn.fetch(query, *args)
         return [
             {

@@ -235,7 +235,7 @@ class Operator:
 
         self.totp_secret = pyotp.random_base32()
         self.password_hash = hash_password(PASSWORD)
-        self.passkey_credentials: list[str] = []
+        self.passkey_credentials: tuple[str, ...] = ()
         self.username = "operator"
 
 
@@ -270,12 +270,21 @@ def login(client: TestClient, operator: Operator, clock: Clock) -> str:
         json={"username": operator.username, "password": PASSWORD, "totp": code},
     )
     assert response.status_code == 200, response.text
-    return response.cookies["__Host-atlas_session"]
+    cookie: str = response.cookies["__Host-atlas_session"]
+    return cookie
 
 
-def test_unauthenticated_reads_are_open_but_writes_are_not(harness: Any) -> None:
+def authed(harness: Any) -> tuple[TestClient, FakeRepo]:
+    client, repo, operator, clock, _ = harness
+    client.cookies.set("__Host-atlas_session", login(client, operator, clock))
+    return client, repo
+
+
+def test_health_is_public_but_everything_else_needs_a_session(harness: Any) -> None:
     client, _, _, _, _ = harness
     assert client.get("/health").status_code == 200
+    for path in ("/positions", "/orders", "/market/pairs", "/news", "/decisions", "/incidents"):
+        assert client.get(path).status_code == 401, path
     assert client.post("/killswitch").status_code == 401
     assert client.post("/mode", json={"mode": "CO_PILOT"}).status_code == 401
 
@@ -352,7 +361,7 @@ def test_killswitch_is_immediate_and_exempt_from_confirmation(harness: Any) -> N
 
 
 def test_bars_carry_age_and_the_5000_bar_cap(harness: Any) -> None:
-    client, _, _, _, _ = harness
+    client, _ = authed(harness)
     window = f"from={(NOW - 3600) * 1000}&to={NOW * 1000}"
     body = client.get(f"/market/bars?pair=BTCIDR&tf=15m&{window}").json()
     assert body["timeframe"] == "15m"
@@ -363,7 +372,7 @@ def test_bars_carry_age_and_the_5000_bar_cap(harness: Any) -> None:
 
 
 def test_positions_are_serialised_without_losing_the_stop_flag(harness: Any) -> None:
-    client, _, _, _, _ = harness
+    client, _ = authed(harness)
     rows = client.get("/positions?status=open").json()["positions"]
     assert rows[0]["stop_confirmation"] == "CONFIRMED"
     assert rows[0]["quantity"] == "0.001"
@@ -371,7 +380,7 @@ def test_positions_are_serialised_without_losing_the_stop_flag(harness: Any) -> 
 
 
 def test_decision_markdown_matches_the_json(harness: Any) -> None:
-    client, _, _, _, _ = harness
+    client, _ = authed(harness)
     cycle_id = str(uuid4())
     as_json = client.get(f"/decisions/{cycle_id}").json()
     assert as_json["agent_run_count"] == 2
@@ -381,7 +390,7 @@ def test_decision_markdown_matches_the_json(harness: Any) -> None:
 
 
 def test_audit_reports_a_broken_chain(harness: Any) -> None:
-    client, repo, _, _, _ = harness
+    client, repo = authed(harness)
     assert client.get("/audit").json()["chain_ok"] is True
     repo.audit_broken = True
     assert client.get("/audit").json()["chain_ok"] is False
