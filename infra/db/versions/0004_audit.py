@@ -51,6 +51,26 @@ CREATE TABLE audit_record (
 CREATE UNIQUE INDEX audit_record_prev_hash_unique ON audit_record (prev_hash)
     WHERE prev_hash <> repeat('0', 64);
 CREATE INDEX audit_record_type_created_idx ON audit_record (record_type, created_at DESC);
+CREATE INDEX audit_record_created_idx ON audit_record (created_at DESC, seq DESC);
+
+-- Privileges do not bind the table owner, which is the role the services connect as.
+-- These triggers are what actually makes the record append-only.
+CREATE FUNCTION audit_record_immutable() RETURNS trigger AS $guard$
+BEGIN
+    RAISE EXCEPTION 'audit_record is append-only: % is not permitted', TG_OP
+        USING ERRCODE = 'check_violation';
+END
+$guard$ LANGUAGE plpgsql;
+
+CREATE TRIGGER audit_record_no_update
+    BEFORE UPDATE ON audit_record
+    FOR EACH ROW EXECUTE FUNCTION audit_record_immutable();
+CREATE TRIGGER audit_record_no_delete
+    BEFORE DELETE ON audit_record
+    FOR EACH ROW EXECUTE FUNCTION audit_record_immutable();
+CREATE TRIGGER audit_record_no_truncate
+    BEFORE TRUNCATE ON audit_record
+    FOR EACH STATEMENT EXECUTE FUNCTION audit_record_immutable();
 
 -- The application may append and read. It may never rewrite history.
 REVOKE UPDATE, DELETE, TRUNCATE ON audit_record FROM PUBLIC;
@@ -71,7 +91,9 @@ CREATE TABLE decision_record (
     market_snapshot_hash  text NOT NULL,
     news_snapshot_hash    text NOT NULL,
     portfolio_snapshot_id uuid REFERENCES portfolio_snapshot (id),
-    order_book_snapshot_id uuid REFERENCES order_book_snapshot (id),
+    -- No FK on purpose: book snapshots expire at 30 days, and an FK would either block
+    -- that retention or cascade-delete audit rows that must outlive the snapshot.
+    order_book_snapshot_id uuid,
     prompt_bundle         jsonb NOT NULL DEFAULT '{}'::jsonb,
     model_meta            jsonb NOT NULL DEFAULT '{}'::jsonb,
     raw_outputs           jsonb NOT NULL DEFAULT '{}'::jsonb,

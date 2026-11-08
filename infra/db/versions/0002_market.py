@@ -17,6 +17,10 @@ depends_on = None
 
 
 UPGRADE = """
+-- The hypertable calls below need the extension; a fresh database is created without it
+-- because pg_init runs only on the first cluster start.
+CREATE EXTENSION IF NOT EXISTS timescaledb;
+
 CREATE TYPE bar_source AS ENUM ('LIVE', 'BACKFILL', 'SYNTHETIC');
 CREATE TYPE health_status AS ENUM ('OK', 'STALE', 'DOWN');
 
@@ -29,9 +33,9 @@ CREATE TABLE market_bar (
     high        numeric(20,8) NOT NULL,
     low         numeric(20,8) NOT NULL,
     close       numeric(20,8) NOT NULL,
-    volume      numeric(28,10) NOT NULL DEFAULT 0,
+    volume      numeric(28,10) NOT NULL,
     trade_count int NOT NULL DEFAULT 0,
-    source      bar_source NOT NULL DEFAULT 'LIVE',
+    source      bar_source NOT NULL,
     ingested_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (venue_id, pair, timeframe, ts),
     CONSTRAINT market_bar_price_order CHECK (
@@ -55,6 +59,9 @@ ALTER TABLE market_bar SET (
 );
 SELECT add_compression_policy('market_bar', INTERVAL '7 days', if_not_exists => TRUE);
 SELECT add_retention_policy('market_bar', INTERVAL '90 days', if_not_exists => TRUE);
+-- The chart query filters (pair, timeframe, ts) across venues, which the primary key
+-- cannot serve because venue_id leads it.
+CREATE INDEX market_bar_pair_tf_ts_idx ON market_bar (pair, timeframe, ts DESC);
 
 CREATE MATERIALIZED VIEW market_bar_5m
 WITH (timescaledb.continuous) AS
@@ -69,6 +76,7 @@ SELECT
     sum(volume) AS volume,
     sum(trade_count) AS trade_count
 FROM market_bar
+WHERE timeframe = '1m'
 GROUP BY venue_id, pair, bucket
 WITH NO DATA;
 
@@ -85,6 +93,7 @@ SELECT
     sum(volume) AS volume,
     sum(trade_count) AS trade_count
 FROM market_bar
+WHERE timeframe = '1m'
 GROUP BY venue_id, pair, bucket
 WITH NO DATA;
 
@@ -106,9 +115,11 @@ CREATE TABLE quote_snapshot (
     pair        text NOT NULL,
     bid         numeric(20,8) NOT NULL,
     ask         numeric(20,8) NOT NULL,
+    last        numeric(20,8),
     bid_size    numeric(28,10) NOT NULL,
     ask_size    numeric(28,10) NOT NULL,
     venue_ts    timestamptz,
+    ts          timestamptz NOT NULL DEFAULT now(),
     ingested_at timestamptz NOT NULL DEFAULT now(),
     seq         bigint NOT NULL DEFAULT 0,
     PRIMARY KEY (venue_id, pair),
@@ -118,22 +129,32 @@ CREATE TABLE quote_snapshot (
 CREATE INDEX quote_snapshot_ingested_idx ON quote_snapshot (ingested_at DESC);
 
 CREATE TABLE order_book_snapshot (
-    id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    ts          timestamptz NOT NULL,
+    id          uuid NOT NULL DEFAULT gen_random_uuid(),
     venue_id    text NOT NULL REFERENCES venue (id),
     pair        text NOT NULL,
-    ts          timestamptz NOT NULL,
     bids        jsonb NOT NULL,
     asks        jsonb NOT NULL,
     checksum    text,
     ingested_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (ts, id),
     CONSTRAINT order_book_snapshot_bids_is_array CHECK (jsonb_typeof(bids) = 'array'),
     CONSTRAINT order_book_snapshot_asks_is_array CHECK (jsonb_typeof(asks) = 'array')
 );
+
+-- Book snapshots are the largest rows in the schema and are only useful while fresh.
+SELECT create_hypertable(
+    'order_book_snapshot', 'ts',
+    chunk_time_interval => INTERVAL '1 day',
+    if_not_exists => TRUE,
+    migrate_data => TRUE
+);
+SELECT add_retention_policy('order_book_snapshot', INTERVAL '30 days', if_not_exists => TRUE);
 CREATE INDEX order_book_snapshot_pair_ts_idx ON order_book_snapshot (pair, ts DESC);
 
 CREATE TABLE data_health (
     source_id            text PRIMARY KEY,
-    last_message_at      timestamptz,
+    last_success_at      timestamptz,
     expected_interval_s  int NOT NULL,
     status               health_status NOT NULL DEFAULT 'DOWN',
     consecutive_failures int NOT NULL DEFAULT 0,

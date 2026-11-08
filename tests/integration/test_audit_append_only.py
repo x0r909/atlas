@@ -14,6 +14,7 @@ from atlas_common.dsn import to_async_dsn
 from atlas_common.hashchain import GENESIS_HASH, verify_chain
 from atlas_execution.audit import append, load_chain, next_entry, verify
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
 DSN = os.environ.get("ATLAS_DB_DSN", "")
@@ -24,6 +25,14 @@ pytestmark = [
 ]
 
 
+async def _empty(connection: AsyncConnection) -> None:
+    """TRUNCATE is refused by audit_record_no_truncate; a test fixture may lift the trigger
+    it is about to prove. Nothing else in the suite touches audit_record."""
+    await connection.execute(text("ALTER TABLE audit_record DISABLE TRIGGER USER"))
+    await connection.execute(text("TRUNCATE audit_record"))
+    await connection.execute(text("ALTER TABLE audit_record ENABLE TRIGGER USER"))
+
+
 @pytest.fixture()
 async def engine() -> AsyncGenerator[AsyncEngine, None]:
     created = create_async_engine(to_async_dsn(DSN))
@@ -32,13 +41,12 @@ async def engine() -> AsyncGenerator[AsyncEngine, None]:
         if exists.scalar() is None:
             await created.dispose()
             pytest.skip("audit_record does not exist; run `alembic upgrade head` first")
-        await connection.execute(text("TRUNCATE audit_record"))
-        await connection.commit()
+        await _empty(connection)
     try:
         yield created
     finally:
         async with created.begin() as connection:
-            await connection.execute(text("TRUNCATE audit_record"))
+            await _empty(connection)
         await created.dispose()
 
 
@@ -71,23 +79,44 @@ async def test_next_entry_is_the_pure_step_of_the_same_formula(conn: AsyncConnec
     assert (await load_chain(conn))[1] == expected
 
 
-async def test_an_edited_payload_breaks_the_chain(conn: AsyncConnection):
+async def test_an_audit_row_cannot_be_edited(conn: AsyncConnection):
+    await append(conn, "ORDER", {"amount_idr": "250000"})
+    with pytest.raises(IntegrityError, match="append-only: UPDATE"):
+        await conn.execute(
+            text("UPDATE audit_record SET payload = CAST(:payload AS jsonb) WHERE seq = 1"),
+            {"payload": '{"amount_idr":"1"}'},
+        )
+
+
+async def test_an_audit_row_cannot_be_deleted(conn: AsyncConnection):
+    for index in range(3):
+        await append(conn, "INCIDENT", {"n": index})
+    with pytest.raises(IntegrityError, match="append-only: DELETE"):
+        await conn.execute(text("DELETE FROM audit_record WHERE seq = 2"))
+
+
+async def test_verification_still_detects_tampering_that_lifts_the_trigger(conn: AsyncConnection):
+    """The trigger is the first line; verify() is the second, for an owner who disables it."""
     await append(conn, "ORDER", {"amount_idr": "250000"})
     await append(conn, "ORDER", {"amount_idr": "300000"})
+    await conn.execute(text("ALTER TABLE audit_record DISABLE TRIGGER USER"))
     await conn.execute(
         text("UPDATE audit_record SET payload = CAST(:payload AS jsonb) WHERE seq = 1"),
         {"payload": '{"amount_idr":"1"}'},
     )
+    await conn.execute(text("ALTER TABLE audit_record ENABLE TRIGGER USER"))
     result = await verify(conn)
     assert result.ok is False
     assert result.broken_at_seq == 1
     assert "hash mismatch" in (result.reason or "")
 
 
-async def test_a_deleted_middle_record_is_reported_as_a_gap(conn: AsyncConnection):
+async def test_a_gap_is_reported_even_if_the_remaining_rows_chain(conn: AsyncConnection):
     for index in range(3):
         await append(conn, "INCIDENT", {"n": index})
+    await conn.execute(text("ALTER TABLE audit_record DISABLE TRIGGER USER"))
     await conn.execute(text("DELETE FROM audit_record WHERE seq = 2"))
+    await conn.execute(text("ALTER TABLE audit_record ENABLE TRIGGER USER"))
     result = await verify(conn)
     assert result.ok is False
     assert result.broken_at_seq == 3

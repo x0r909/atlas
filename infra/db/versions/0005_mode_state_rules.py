@@ -18,19 +18,37 @@ depends_on = None
 
 UPGRADE = r"""
 ALTER TABLE mode_state
+    ADD COLUMN prev_seq bigint REFERENCES mode_state (seq),
+    -- The link is unique, so a fork (two successors of one row) fails on commit even if
+    -- two writers manage to read the same predecessor.
+    ADD CONSTRAINT mode_state_prev_seq_unique UNIQUE (prev_seq);
+
+ALTER TABLE mode_state
     ADD CONSTRAINT mode_state_capital_cap_by_stage CHECK (
         (mode = 'CO_PILOT' AND capital_cap_idr IS NOT NULL AND capital_cap_idr <= 30000)
         OR (mode <> 'CO_PILOT' AND capital_cap_idr IS NULL)
+    ),
+    -- A demotion reason must not be recorded against a promotion target.
+    ADD CONSTRAINT mode_state_reason_matches_direction CHECK (
+        reason_code NOT IN ('AUTO_DEMOTE', 'OPERATOR_DEMOTION')
+        OR mode IN ('PAPER', 'CO_PILOT', 'HALTED')
+    ),
+    ADD CONSTRAINT mode_state_actor_ref_shape CHECK (
+        actor_ref IS NULL OR (actor = 'OPERATOR' AND btrim(actor_ref) <> '')
     );
 
 CREATE FUNCTION mode_state_transition_guard() RETURNS trigger AS $guard$
 DECLARE
     current_mode mode_stage;
-    current_id   uuid;
+    current_seq  bigint;
 BEGIN
-    SELECT mode, id INTO current_mode, current_id
+    -- Serialises writers: without it two concurrent appends both validate against the
+    -- same predecessor and the rollout history forks.
+    PERFORM pg_advisory_xact_lock(hashtext('mode_state'));
+
+    SELECT mode, seq INTO current_mode, current_seq
     FROM mode_state
-    ORDER BY created_at DESC, id DESC
+    ORDER BY seq DESC
     LIMIT 1;
 
     IF NOT FOUND THEN
@@ -50,6 +68,11 @@ BEGIN
                 USING ERRCODE = 'check_violation';
         END IF;
         RETURN NEW;
+    END IF;
+
+    IF NEW.reason_code = 'STARTUP_DEFAULT' THEN
+        RAISE EXCEPTION 'mode_state: STARTUP_DEFAULT is reserved for the seed row'
+            USING ERRCODE = 'check_violation';
     END IF;
 
     IF NEW.previous_mode IS DISTINCT FROM current_mode THEN
@@ -84,6 +107,7 @@ BEGIN
             USING ERRCODE = 'check_violation';
     END IF;
 
+    NEW.prev_seq := current_seq;
     RETURN NEW;
 END
 $guard$ LANGUAGE plpgsql;
@@ -107,18 +131,30 @@ CREATE TRIGGER mode_state_no_delete
     BEFORE DELETE ON mode_state
     FOR EACH ROW EXECUTE FUNCTION mode_state_append_only();
 
+-- Row triggers do not fire on TRUNCATE, and one statement would erase the whole history.
+CREATE TRIGGER mode_state_no_truncate
+    BEFORE TRUNCATE ON mode_state
+    FOR EACH STATEMENT EXECUTE FUNCTION mode_state_append_only();
+
+REVOKE TRUNCATE ON mode_state FROM PUBLIC;
+
 INSERT INTO mode_state (mode, previous_mode, reason_code, actor)
 VALUES ('PAPER', NULL, 'STARTUP_DEFAULT', 'SYSTEM');
 """
 
 DOWNGRADE = """
-DELETE FROM mode_state WHERE reason_code = 'STARTUP_DEFAULT' AND previous_mode IS NULL;
+DROP TRIGGER IF EXISTS mode_state_no_truncate ON mode_state;
 DROP TRIGGER IF EXISTS mode_state_no_delete ON mode_state;
 DROP TRIGGER IF EXISTS mode_state_no_update ON mode_state;
+DELETE FROM mode_state WHERE reason_code = 'STARTUP_DEFAULT' AND previous_mode IS NULL;
 DROP TRIGGER IF EXISTS mode_state_transition_guard ON mode_state;
 DROP FUNCTION IF EXISTS mode_state_append_only();
 DROP FUNCTION IF EXISTS mode_state_transition_guard();
+ALTER TABLE mode_state DROP CONSTRAINT IF EXISTS mode_state_actor_ref_shape;
+ALTER TABLE mode_state DROP CONSTRAINT IF EXISTS mode_state_reason_matches_direction;
 ALTER TABLE mode_state DROP CONSTRAINT IF EXISTS mode_state_capital_cap_by_stage;
+ALTER TABLE mode_state DROP CONSTRAINT IF EXISTS mode_state_prev_seq_unique;
+ALTER TABLE mode_state DROP COLUMN IF EXISTS prev_seq;
 """
 
 

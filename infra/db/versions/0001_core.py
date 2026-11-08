@@ -42,11 +42,16 @@ CREATE TABLE operator (
 
 CREATE TABLE mode_state (
     id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    -- Monotonic, and the only ordering the rollout guard trusts: created_at is
+    -- transaction-constant and id is random, so neither can say which row is current.
+    seq              bigint GENERATED ALWAYS AS IDENTITY UNIQUE,
     mode             mode_stage NOT NULL,
     previous_mode    mode_stage,
     reason_code      mode_reason_code NOT NULL,
     capital_cap_idr  numeric(28,10),
     actor            mode_actor NOT NULL,
+    -- Who acted, when the actor is a person: the enum says OPERATOR, this says which one.
+    actor_ref        text,
     evidence_ref     uuid,
     created_at       timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT mode_state_cap_positive CHECK (capital_cap_idr IS NULL OR capital_cap_idr > 0),
@@ -62,7 +67,7 @@ CREATE TABLE mode_state (
         )
     )
 );
-CREATE INDEX mode_state_latest_idx ON mode_state (created_at DESC, id DESC);
+CREATE INDEX mode_state_latest_idx ON mode_state (seq DESC);
 
 CREATE TABLE risk_config (
     version                      int PRIMARY KEY,
@@ -91,6 +96,19 @@ CREATE TABLE risk_config (
         AND max_total_exposure_pct > 0 AND max_daily_loss_pct > 0 AND max_drawdown_pct > 0
         AND min_rr_net > 0 AND max_slippage_pct >= 0 AND max_spread_multiple > 0
         AND volatility_breaker_sigma > 0
+    ),
+    -- Upper bounds, not only lower: a percentage of 900 defeats the breaker it configures.
+    CONSTRAINT risk_config_pct_upper_bounds CHECK (
+        risk_per_trade_pct <= 10 AND max_position_pct <= 100
+        AND max_asset_exposure_pct <= 100 AND max_total_exposure_pct <= 100
+        AND max_daily_loss_pct <= 100 AND max_drawdown_pct <= 100
+        AND max_slippage_pct <= 100 AND max_spread_multiple <= 100
+    ),
+    CONSTRAINT risk_config_pct_ordering CHECK (
+        risk_per_trade_pct <= max_position_pct
+        AND max_position_pct <= max_asset_exposure_pct
+        AND max_asset_exposure_pct <= max_total_exposure_pct
+        AND max_daily_loss_pct <= max_drawdown_pct
     ),
     CONSTRAINT risk_config_counts_positive CHECK (
         stale_price_seconds > 0 AND cooldown_after_losses >= 0 AND cooldown_hours >= 0
@@ -124,8 +142,8 @@ CREATE TABLE venue_profile (
     tax_ppn_pct            numeric(7,5) NOT NULL,
     tax_applies_to         tax_applies_to NOT NULL,
     min_notional_idr       numeric(18,2) NOT NULL,
-    min_order_step         jsonb NOT NULL DEFAULT '{}'::jsonb,
-    tick_size              jsonb NOT NULL DEFAULT '{}'::jsonb,
+    min_order_step         jsonb NOT NULL,
+    tick_size              jsonb NOT NULL,
     rate_limit             jsonb NOT NULL,
     max_leverage           int NOT NULL DEFAULT 1,
     native_stop_orders     boolean NOT NULL,
@@ -141,8 +159,18 @@ CREATE TABLE venue_profile (
         AND cfx_fee_pct_assumed >= 0 AND tax_buy_pct_assumed >= 0
         AND (cfx_fee_pct IS NULL OR cfx_fee_pct >= 0)
     ),
+    -- An assumed cost must be a real assumption: 0 would make the cost model look
+    -- verified (and profitable) exactly where the truth is unknown.
+    CONSTRAINT venue_profile_assumed_cfx_is_positive CHECK (cfx_fee_pct_assumed > 0),
     CONSTRAINT venue_profile_assumed_cfx_is_pessimistic CHECK (
         cfx_fee_pct IS NULL OR cfx_fee_pct_assumed >= cfx_fee_pct
+    ),
+    CONSTRAINT venue_profile_assumed_cfx_is_floor CHECK (
+        cfx_fee_pct IS NOT NULL OR cfx_fee_pct_assumed >= 0.10000
+    ),
+    CONSTRAINT venue_profile_order_rules_present CHECK (
+        jsonb_typeof(tick_size) = 'object' AND tick_size <> '{}'::jsonb
+        AND jsonb_typeof(min_order_step) = 'object' AND min_order_step <> '{}'::jsonb
     ),
     CONSTRAINT venue_profile_min_notional_positive CHECK (min_notional_idr > 0)
 );

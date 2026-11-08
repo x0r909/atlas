@@ -168,6 +168,13 @@ CREATE TABLE risk_verdict (
         (sized_quantity IS NULL OR sized_quantity > 0)
         AND (sized_notional_idr IS NULL OR sized_notional_idr > 0)
     ),
+    -- An approval without a size hands sizing to whoever submits the order.
+    CONSTRAINT risk_verdict_approved_is_sized CHECK (
+        NOT approved OR (sized_quantity IS NOT NULL AND sized_notional_idr IS NOT NULL)
+    ),
+    CONSTRAINT risk_verdict_consumption_paired CHECK (
+        (consumed_at IS NULL) = (consumed_by_order_id IS NULL)
+    ),
     CONSTRAINT risk_verdict_assumed_cost_needs_breakdown CHECK (
         cost_model_source <> 'ASSUMED' OR cost_breakdown IS NOT NULL
     )
@@ -177,6 +184,9 @@ CREATE UNIQUE INDEX risk_verdict_one_per_proposal ON risk_verdict (proposal_id)
 CREATE UNIQUE INDEX risk_verdict_one_per_action ON risk_verdict (management_action_id)
     WHERE management_action_id IS NOT NULL;
 CREATE INDEX risk_verdict_verdict_at_idx ON risk_verdict (verdict_at DESC);
+-- Composite keys so an order can only cite a verdict that approved THAT proposal.
+CREATE UNIQUE INDEX risk_verdict_id_proposal_idx ON risk_verdict (id, proposal_id);
+CREATE UNIQUE INDEX risk_verdict_id_approved_idx ON risk_verdict (id, approved);
 
 CREATE TABLE signed_order (
     id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -188,17 +198,25 @@ CREATE TABLE signed_order (
     type              order_type NOT NULL,
     quantity          numeric(28,10) NOT NULL,
     limit_price       numeric(20,8),
-    stop_price        numeric(20,8),
-    client_order_id   text NOT NULL,
+    stop_price        numeric(20,8),    client_order_id   text NOT NULL,
     signature         text NOT NULL,
     signed_at         timestamptz NOT NULL DEFAULT now(),
     expires_at        timestamptz NOT NULL,
+    -- Copy of risk_verdict.approved so the composite FK below can require it.
+    verdict_approved  boolean NOT NULL DEFAULT true,
     CONSTRAINT signed_order_quantity_positive CHECK (quantity > 0),
     CONSTRAINT signed_order_limit_price_required CHECK (
         type <> 'LIMIT' OR (limit_price IS NOT NULL AND limit_price > 0)
     ),
     CONSTRAINT signed_order_expiry_after_signing CHECK (expires_at > signed_at),
-    CONSTRAINT signed_order_expiry_window CHECK (expires_at <= signed_at + INTERVAL '60 seconds')
+    CONSTRAINT signed_order_expiry_window CHECK (expires_at <= signed_at + INTERVAL '60 seconds'),
+    -- Every signed entry must carry the stop it was approved with.
+    CONSTRAINT signed_order_entry_has_stop CHECK (side <> 'BUY' OR stop_price IS NOT NULL),
+    CONSTRAINT signed_order_verdict_approved CHECK (verdict_approved),
+    CONSTRAINT signed_order_verdict_matches_proposal FOREIGN KEY (verdict_id, proposal_id)
+        REFERENCES risk_verdict (id, proposal_id),
+    CONSTRAINT signed_order_verdict_is_approved FOREIGN KEY (verdict_id, verdict_approved)
+        REFERENCES risk_verdict (id, approved)
 );
 
 CREATE TABLE "order" (
@@ -238,6 +256,9 @@ CREATE TABLE "order" (
     ),
     CONSTRAINT order_partial_fill_is_consistent CHECK (
         status <> 'PARTIALLY_FILLED' OR (filled_quantity > 0 AND filled_quantity < quantity)
+    ),
+    CONSTRAINT order_open_is_not_full CHECK (
+        status <> 'OPEN' OR filled_quantity < quantity
     ),
     CONSTRAINT order_filled_status_is_consistent CHECK (
         status <> 'FILLED' OR filled_quantity = quantity
@@ -304,7 +325,7 @@ CREATE TABLE position (
         (stop_confirmation = 'UNCONFIRMED') = (stop_unconfirmed_at IS NOT NULL)
     ),
     CONSTRAINT position_monitored_has_no_native_stop CHECK (
-        stop_protection = 'NATIVE_ORDER' OR stop_order_id IS NULL
+        stop_protection <> 'NATIVE_ORDER' OR stop_order_id IS NOT NULL
     ),
     CONSTRAINT position_closed_is_complete CHECK (
         (status IN ('CLOSED', 'STOP_LOST')) = (closed_at IS NOT NULL)
@@ -336,6 +357,14 @@ CREATE TABLE portfolio_snapshot (
 );
 CREATE INDEX portfolio_snapshot_ts_idx ON portfolio_snapshot (ts DESC);
 CREATE INDEX portfolio_snapshot_reconciled_idx ON portfolio_snapshot (reconciled, ts DESC);
+
+-- These tables are created after risk_verdict, so their foreign keys land here.
+ALTER TABLE risk_verdict
+    ADD CONSTRAINT risk_verdict_portfolio_snapshot_fk
+        FOREIGN KEY (portfolio_snapshot_id) REFERENCES portfolio_snapshot (id);
+ALTER TABLE risk_verdict
+    ADD CONSTRAINT risk_verdict_consumed_by_order_fk
+        FOREIGN KEY (consumed_by_order_id) REFERENCES "order" (id);
 
 CREATE TABLE stop_monitor_heartbeat (
     process_id       text PRIMARY KEY,

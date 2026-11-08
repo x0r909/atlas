@@ -1,0 +1,6 @@
+# Not a buildable project: this file exists so mypy run from infra/db resolves the
+# repo venv and the workspace packages. Tool paths are relative to this directory,
+# which is where pi-lens resolves mypy's cwd.
+[tool.mypy]
+python_executable = "../../.venv/bin/python"
+mypy_path = ["../../packages/common"]
