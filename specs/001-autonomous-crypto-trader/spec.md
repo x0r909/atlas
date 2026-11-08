@@ -373,7 +373,9 @@ through the operator action and confirm the cap and the audit entry.
   score, expected horizon, and source credibility tier (tier 1 most credible, tier 3 rumor or
   unverified).
 - **FR-013**: System MUST NOT open a position when tier-3 news or rumor is the only supporting
-  evidence.
+  evidence. Risk Engine rule `NEWS_ONLY_EVIDENCE` enforces this: a proposal passes only with at
+  least one technical (`BAR`) item or one tier-1/tier-2 news item, and is rejected when every
+  item is tier-3 news or social, or when the evidence list is empty.
 - **FR-014**: System MUST treat all external text as untrusted data. It MUST flag suspected
   prompt-injection content, and external text MUST NOT change mode, risk limits,
   configuration, or agent instructions.
@@ -459,7 +461,8 @@ through the operator action and confirm the cap and the audit entry.
   configured slippage limit.
 - **FR-033**: If the stop loss cannot be confirmed after an entry fill, the Execution Engine
   MUST close the position immediately and raise an incident. A close that itself fails MUST
-  follow the escalation in FR-070.
+  follow the escalation in FR-070. The incident is `STOP_UNCONFIRMED` (class `SAFETY`), the close
+  is reduce-only, and no mode, breaker, or budget condition may block it.
 - **FR-034**: The Execution Engine MUST reconcile positions, orders, and balances with each
   enabled venue at startup and periodically, and MUST maintain one portfolio view across
   venues. A mismatch MUST block new positions until it is resolved.

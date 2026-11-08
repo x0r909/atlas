@@ -27,9 +27,19 @@ timestamps are epoch ms (UTC) unless stated. Errors use a single shape:
 - `POST /auth/totp` `{code}` → session promoted. 5 failures ⇒ 15-min lockout + audit event.
 - `POST /auth/passkey/begin` / `/auth/passkey/finish` — optional second factor.
 - `POST /auth/logout`, `GET /auth/session`.
-- Every mutating endpoint requires `X-Atlas-Confirm: <token>` obtained from
-  `POST /confirm` `{action, params_hash}` (short-lived, 60 s, single use). This is the
-  server-side confirmation step for kill switch, mode change, and limit changes.
+- Every mutating endpoint is audited (see Confirmation strength for which proof each one needs).
+
+Session invariants (each one is an integration test in `tests/integration/test_auth_flow.py`):
+
+- the session cookie is `HttpOnly`, `Secure`, `SameSite=Strict`, and a session idle for 8 h is
+  refused on every route, `GET /auth/session` included;
+- a TOTP code is valid once: replaying the previous code for the same time step fails;
+- a passkey challenge is single-use: a replayed assertion fails;
+- `POST /auth/logout` revokes the session server-side, so the old cookie no longer authenticates
+  even when replayed from another client;
+- 5 failed logins lock the account for 15 min; the lockout is recorded, not just returned;
+- every login attempt (success, failure, lockout) and every operator action writes exactly one
+  `audit_record` with actor, timestamp, and source address.
 
 ## Read endpoints
 
@@ -54,7 +64,32 @@ timestamps are epoch ms (UTC) unless stated. Errors use a single shape:
 `/decisions/{id}` supports `?format=md` to download the replay bundle for offline analysis.
 Raw prompts are returned only to an authenticated operator, never to the model or to logs.
 
-## Write endpoints (all audited, all require confirmation token)
+## Write endpoints (all audited)
+
+### Confirmation strength
+
+Every mutating write is audited, but not every write demands the same proof. `X-Atlas-Confirm`
+is a single-use token (60 s TTL) obtained from `POST /confirm` `{action, params_hash}`; it is
+bound to one action and one parameter hash, so replaying it for a different body fails.
+
+| Endpoint | Proof required | Why |
+| --- | --- | --- |
+| `POST /mode` | session + `X-Atlas-Confirm` | changes what the system may do next |
+| `PUT /risk/config` | session + `X-Atlas-Confirm` | changes the limits that protect capital |
+| `POST /promotion/confirm` | session + step-up re-auth + `X-Atlas-Confirm` | the human promotion act (constitution IV) |
+| `POST /halt/lift` | session + `X-Atlas-Confirm` | re-opens entries after a limit halt |
+| `POST /positions/{id}/stop` | session only | tightens protection only; reduce-only, so no second step (FR-063, FR-071) |
+| `POST /killswitch` | session only | emergency stop — a second step is a new failure mode |
+| `POST /positions/{id}/close` | session only | reduces exposure (FR-063, FR-071) |
+
+A missing, expired, reused, or wrong-`params_hash` token is refused with
+`403 CONFIRM_REQUIRED` on the four guarded endpoints. It is **never** required for
+`POST /killswitch`, `POST /positions/{id}/close`, or `POST /positions/{id}/stop`: all three
+must work with nothing more than an authenticated session, and a lockout of the dashboard
+account (5 failed logins ⇒ 15 min) neither invalidates an existing session nor touches the
+Telegram control path in `contracts/telegram-control.md`, which authenticates on its own
+allowlist + TOTP. Tighten-only remains the guard for a stop, not a token: a stop moved away
+from the entry is still refused with `409 STOP_NOT_TIGHTENING`.
 
 | Method | Path | Body | Notes |
 | --- | --- | --- | --- |
@@ -62,7 +97,7 @@ Raw prompts are returned only to an authenticated operator, never to the model o
 | POST | `/mode` | `{to: "PAPER"\|"CO_PILOT"\|"AUTONOMOUS", evidence_id?, reason}` | promotion requires a passing `promotion_evaluation` id + operator confirm; demotion always allowed |
 | PUT | `/risk/config` | full new config | validated ranges; bumps version; never mutates history |
 | POST | `/positions/{id}/close` | `{reason}` | operator override; still goes through Execution (never direct venue call from UI) |
-| POST | `/positions/{id}/stop` | `{new_stop_price}` | tighten-only |
+| POST | `/positions/{id}/stop` | `{new_stop_price}` | tighten-only; session auth only, no confirm token |
 | POST | `/promotion/evaluate` | `{to}` | records a `promotion_evaluation` row |
 | POST | `/promotion/confirm` | `{evaluation_id}` | the explicit operator promotion act (constitution IV) |
 | POST | `/halt/lift` | `{reason}` | only the operator may lift a limit-triggered halt |
@@ -82,7 +117,8 @@ refuse `POST /positions/{id}/close` or `POST /positions/{id}/stop`: those two ar
 to Execution and processed while the system is Halted, while a circuit breaker is active,
 while the spend cap is exhausted, and while an `UNKNOWN` order freezes the venue. A close or
 stop that fails does so for its own reason (venue rejection, unknown position), never because
-of a system state.
+of a system state. A missing or invalid `X-Atlas-Confirm` token likewise never refuses an exit:
+the exit endpoints (`close`, `stop`, and `killswitch`) require only an authenticated session.
 
 ### Operator actions on a position (FR-063, FR-071, SC-021, SC-027)
 

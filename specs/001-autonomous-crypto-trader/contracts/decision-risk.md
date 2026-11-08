@@ -44,8 +44,20 @@ class TradeProposal(BaseModel):
     intended_notional_idr: Decimal       # suggestion only; Risk Engine resizes
     confidence: Decimal                  # 0..1
     rationale_summary: str               # <= 400 chars, untrusted text
-    evidence_refs: list[UUID]            # news_id / bar window ids
+    evidence: list[EvidenceRef]           # typed; tier-3-only evidence cannot open a position
 ```
+
+```python
+class EvidenceRef(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    kind: Literal["BAR", "NEWS", "SOCIAL"]
+    ref_id: UUID                         # bar window id, news_id, or social item id
+    source_tier: Literal[1, 2, 3] | None # required for NEWS/SOCIAL, null for BAR
+```
+
+Evidence is typed rather than a bare id list because `NEWS_ONLY_EVIDENCE` must be decidable
+from the proposal alone — resolving an opaque UUID against the database would make the rule
+impure and untestable.
 
 Invariants (validated before the Risk Engine sees it):
 `stop_price < entry_price < target_price`; `horizon_hours ∈ [4,120]`;
@@ -155,7 +167,7 @@ computed from stored position state, never from the caller's claim (FR-071).
 
 1. `MARKET_NOT_SPOT`, `VENUE_NOT_LIVE_ENABLED`
 2. `RECONCILIATION_MISMATCH`, `STALE_PRICE`, `SPREAD_BREAKER`, `VOLATILITY_BREAKER`,
-   `MACRO_BLACKOUT`
+   `MACRO_BLACKOUT`, `NEWS_ONLY_EVIDENCE`
 3. `NO_STOP_LOSS`, `STOP_TOO_WIDE`, `RR_BELOW_MIN`
 4. sizing: `MIN_ORDER_EXCEEDS_RISK_BUDGET`, `POSITION_SIZE_EXCEEDS_MAX`
 5. portfolio: `ASSET_EXPOSURE_EXCEEDS_MAX`, `TOTAL_EXPOSURE_EXCEEDS_MAX`,
@@ -165,7 +177,24 @@ computed from stored position state, never from the caller's claim (FR-071).
 
 Every rule is a pure function `(snapshot, proposal, config, profile) -> RuleResult`.
 `rule_results` order is stable and asserted by a golden test, so the audit record diffs
-cleanly across versions.
+cleanly across versions. The six stages hold 22 evaluated rule ids; `INVALID_OUTPUT` is the
+envelope-level rejection (section 1) and never appears in `rule_results`, so the contract
+documents 23 ids in total.
+
+### Rule: `NEWS_ONLY_EVIDENCE` (FR-013)
+
+Rejects a proposal whose supporting evidence is **only** unverified material:
+
+| Evidence set | Outcome |
+| --- | --- |
+| one or more `BAR` items | passes |
+| at least one `NEWS`/`SOCIAL` item with `source_tier` 1 or 2 | passes |
+| only `NEWS`/`SOCIAL` items, all `source_tier == 3` | rejects `NEWS_ONLY_EVIDENCE` |
+| empty evidence list | rejects `NEWS_ONLY_EVIDENCE` (an unexplained trade is not a researched one) |
+
+Tier-3 material is still allowed as *support* beside technical or tier-1/2 evidence; the rule
+forbids it as the sole justification. `observed` names the highest tier present and the
+`BAR` count, so the audit record shows why the rule fired.
 
 ### Sizing formula (normative)
 
@@ -183,6 +212,25 @@ if notional > equity * 25%:        qty = floor_to_step(...) or reject POSITION_S
 Rounding is always **down**; the verdict reports the realised risk after rounding.
 `rr_net = (target - entry - cost_per_unit) / (entry - stop + cost_per_unit)` where
 `cost_per_unit` is the full round-trip cost (fees + CFX + PPh + PPN + slippage) per unit.
+
+### Stop not confirmed after a fill (FR-033, FR-063, FR-071)
+
+An entry fill does not become a protected position until a stop is confirmed. The Execution
+Engine tracks `position.stop_confirmation = CONFIRMED | UNCONFIRMED`:
+
+- the stop order is rejected, times out, or is never acknowledged ⇒ `UNCONFIRMED`;
+- `UNCONFIRMED` starts the immediate reduce-only close path in the same cycle, writes one
+  `SAFETY` `audit_record`, raises incident `STOP_UNCONFIRMED`, and opens a Telegram alert;
+- the close is reduce-only, so `HALTED`, an active breaker, and an exhausted LLM budget cannot
+  block it — the same exemption the mode gate grants (FR-071);
+- a close that itself fails follows the FR-070 escalation ladder (retry, alert at the second
+  failure, bounded market fallback, `HALTED` when flat cannot be reached);
+- entries stay blocked until the position is flat, so an unconfirmed stop cannot be doubled
+  down on.
+
+`STOP_UNCONFIRMED` is an incident id, not a risk rule: no verdict was involved and
+`rule_results` is empty. It is distinct from `NO_STOP_LOSS`, which rejects a *proposal* that
+never carried a stop price.
 
 ## 5. `SignedOrder`
 

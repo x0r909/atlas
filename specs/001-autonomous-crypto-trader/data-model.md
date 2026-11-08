@@ -324,6 +324,8 @@ stop order is sized to `filled_quantity` and re-sized on every subsequent fill o
 | stop_price, stop_order_id | stop must exist within 30 s of fill (FR-019); `stop_order_id` null when the venue has no native stop and the monitor owns protection |
 | stop_protection | enum `NATIVE_ORDER, MONITORED` — `MONITORED` means the stop-monitor process is responsible |
 | stop_monitor_seen_at | last heartbeat that confirmed this position's stop is in place (FR-067) |
+| stop_confirmation | enum `CONFIRMED, UNCONFIRMED`, default `CONFIRMED`; `UNCONFIRMED` means the venue rejected or never acknowledged the protective stop after the fill (FR-033) |
+| stop_unconfirmed_at | NOT NULL when `stop_confirmation='UNCONFIRMED'`, NULL otherwise (check constraint pairs the two columns) |
 | target_price | |
 | opened_at, time_stop_at | `opened_at + 120h` |
 | status | enum `OPEN, CLOSING, CLOSED, STOP_LOST` |
@@ -372,7 +374,7 @@ Retention: 2 years (≈ 270 MB/90 days at 30 KB — comfortable).
 | --- | --- |
 | id, opened_at, closed_at | |
 | class | `SAFETY` / `OPERATIONAL` |
-| kind | safety: `ORDER_WITHOUT_STOP, HARD_LIMIT_BREACH, DUPLICATE_ORDER, POSITION_MISMATCH, KILL_SWITCH_FAILURE`; operational: `VENUE_DOWN, STALE_DATA, LLM_FAILURE, BUDGET_THROTTLE, RECONCILE_DELAY, LOG_CHAIN_BREAK` |
+| kind | safety: `ORDER_WITHOUT_STOP, HARD_LIMIT_BREACH, DUPLICATE_ORDER, POSITION_MISMATCH, KILL_SWITCH_FAILURE, STOP_UNCONFIRMED, ADOPTED_POSITION_UNPROTECTED, STOP_MONITOR_UNRESPONSIVE`; operational: `VENUE_DOWN, STALE_DATA, LLM_FAILURE, BUDGET_THROTTLE, RECONCILE_DELAY, LOG_CHAIN_BREAK` |
 | severity | `SEV1` (safety) / `SEV2` / `SEV3` |
 | auto_action | `NONE, HALTED, THROTTLED` |
 | root_cause, remediation, operator_ack_at | |
@@ -435,3 +437,7 @@ snapshot hashes; `incident` may reference a `decision_record` or a `reconcile_ru
 10. Reduce-only mutations (`CLOSE`, protective-stop place/modify, entry cancel) are never
     blocked by mode, breaker, spend cap, or `UNKNOWN` freeze — only by signature/lifetime
     validity, so an exit can always reach the venue (FR-063, SC-021).
+11. A `position` with `status='OPEN'` and `stop_confirmation='UNCONFIRMED'` must be closed or
+    confirmed within one execution cycle (FR-033). Surviving a cycle still `UNCONFIRMED` is a
+    safety breach: it raises `SAFETY/STOP_UNCONFIRMED` (`SEV1`), blocks new entries, and
+    alerts the operator; `stop_unconfirmed_at` records when the state began.
