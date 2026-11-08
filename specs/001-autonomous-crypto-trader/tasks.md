@@ -382,3 +382,4 @@ Agents v1 and real LLM calls (M4), backtest lab (M5), embeddings/pgvector tables
 - Every test task states the requirement it proves, and the requirement id appears verbatim in the assertion message so a failure names the rule.
 - Venue facts live in `venue_profile`; no task may hard-code fees, taxes, minimums, or rate limits.
 - Commit per task or per small group; keep `spec.md`, `plan.md`, and `data-model.md` in sync if a task changes a contract.
+- **M0 checkboxes are a branch-wide delivery claim, not a claim about the diff that flips them.** `T001`–`T003` and `T005`–`T009` were delivered by `fee9d3b` (M0 tooling, compose stack, VPS units, credential render path), `T010`–`T012b` by `2fef8eb` (money, clock, mode default, log redaction), and `T004` by `565b862` (lockfile) plus `23344e7` (Next scaffold). A reader verifying a `[X]` on this page should follow the named commit, not the commit that flips the box; `git log --oneline` reconstructs the whole sequence.
