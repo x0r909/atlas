@@ -90,3 +90,28 @@ monitor and raised as an incident — never discarded.
 4. `ProtectiveStopRequest` with a wider stop than the recorded one ⇒ rejected and recorded.
 5. Stale `generation` ⇒ ignored without touching the venue.
 6. Monitor running with no open positions ⇒ heartbeat continues, zero orders emitted.
+
+## 7. Rate budget for exits (why slower is safer)
+
+The venue allows 20 create-order calls per second per account per pair, and violating it does
+not return an error — it **blocks trading on that pair for 5 seconds**. A stop monitor that
+spends that budget is one that stops working precisely during the crash it exists for.
+
+So exits get their own, much smaller reservation, enforced in `ratelimit.py` as a separate
+`stop` class:
+
+| Limit | Value | Rationale |
+| --- | --- | --- |
+| Create-order calls per pair | 2 per second | 10× headroom under the venue ceiling; a stop is one call per position per cycle |
+| Create-order calls venue-wide | 8 per second | a correlated drop hits many pairs at once; the venue-wide cap is what keeps the account out of the block |
+| Retry after a `429` or a `5xx` | exponential backoff with jitter, max 3 attempts | retrying into a block extends the outage |
+| A queued exit that cannot be sent within the budget | escalate to the operator, never drop silently | a stop that quietly waits is worse than a loud one |
+
+Normal traffic (one check per position per 10 s) never approaches these numbers; the budget
+exists for the correlated case where every position must be stopped at once and the venue is
+already under stress.
+
+Conformance test: `T087a` (`tests/integration/test_stop_burst_rate.py`) — a burst of stops and
+closes across several pairs stays under 2 rps per pair and 8 rps venue-wide, never triggers the
+5-second block, and backs off with one incident rather than a retry storm when the venue
+returns `429`.

@@ -111,56 +111,127 @@ cadence. On-chain signals are *context* only; they never size a position.
 
 ---
 
-## R5. Indodax API and minimum order — verified facts
+## R5. Indodax API and venue facts — verified 2026-11-08
 
-**Verified 2026-11-08**:
-- Minimum buy **and** sell order is **Rp10.000**, identical for Limit and Instant (Market)
-  orders, per Indodax Help Center ("Berapa minimal pembelian koin di Indodax dalam
-  rupiah?", "Berapa Minimal Transaksi Menggunakan Limit Order?").
-- Official API family: public REST at `https://indodax.com/api/*`, private REST at
-  `https://indodax.com/tapi`, newer Trade API 2.0 at `https://tapi.indodax.com`
-  (`GET /api/v2/order/histories`), private WebSocket at `wss://indodax.com/` (alternate
-  `btcapi.net` requires whitelisting), documented in `btcid/indodax-official-api-docs`.
-- Indodax operates self-trade prevention on the trade API — relevant to idempotency and to
-  cancellation logic (never assume a cancel succeeded; confirm via order history).
-- Since **1 October 2026** Indodax applies an "all-in fee" structure implementing SEB
-  No. 001/SEB2026/CFX-KKI/SPOT/II/2026; the CFX component dropped from 0.0111% to
-  **0.00555%** on the IDR market (0.0111% on USDT market).
+Full evidence table with source URLs: [`docs/adr/0001-indodax-venue-facts.md`](../../docs/adr/0001-indodax-venue-facts.md).
+Every figure below was read on 2026-11-08 from the [official API documentation PDF](https://indodax.com/downloads/INDODAXCOM-API-DOCUMENTATION.pdf),
+the [official `/api/pairs` endpoint](https://indodax.com/api/pairs), the Indodax Help Center, or
+DJP/PMK 50/2025. Values the sources do not state are **not** recorded as numbers.
 
-**Re-verify at M0** (blocking for M3): exact maker/taker all-in percentage per market,
-whether the fee is charged on notional or on received amount, minimum order *size* steps
-per pair, tick size, and the private-API rate limits. All of it is written into
-`venue_profile` and asserted by a startup self-check against the venue's own fee endpoint.
+**Verified**:
+- **No native stop order and no OCO.** API 2.0's Create Order accepts `LIMIT`/`MARKET` only
+  and rejects a stop type with `-1130 … stop_limit_not_available`; its parameter table has no
+  stop/trigger price. API 1.0 documents `order_type: limit, market`; its only `stoplimit`
+  occurrence is a `cancelOrder` parameter. OCO is explicitly unavailable. A Stop Limit Order
+  does exist in the web/app UI, but it is not reachable from the API and its trigger semantics
+  are undocumented.
+  ⇒ `venue_profile.native_stop_orders = false` is **proven**, so FR-067's client-side stop
+  monitor is the primary protective mechanism, not a fallback.
+- **Minimum order**: Rp10.000 on all 438 IDR pairs (`trade_min_base_currency`); Rp25.000 to
+  trade directly on INDODAX Pro, with Rp10.000–Rp24.999 auto-routed to Lite. The API itself
+  accepts Rp10.000.
+- **Per-pair service fee**: IDR maker **0.1%** / taker **0.2%** (identical on all 438 pairs);
+  USDT maker 0.03% / taker 0.06%. Fields `trade_fee_percent_maker` / `_taker` of `/api/pairs`.
+- **Tick size** = `pricescale` (= `price_precision`), per pair: BTCIDR and ETHIDR Rp1.000,
+  USDTIDR and XRPIDR Rp1.
+- **Quantity step** = `quantity_increment`, per pair: `1e-08` for BTCIDR/ETHIDR (384 pairs
+  use `1e-08`, 61 use `1`, 5 use `1e-06`).
+- **Cost structure**: all-in fee = service fee + tax + CFX fee, charged on maker *and* taker,
+  on both Buy and Sell, on both IDR and USDT markets.
+- **Tax**: PPh final **0.21%**, seller side, since 2025-08-01 (PMK 50/2025); PPN on crypto
+  transfers is **0%** since the same date.
+- **Rate limits**: public API 180 req/min; private API 300 req/min per IP per endpoint (50 for
+  capital/fiat); order creation additionally 20 req/s per account per pair, and exceeding it
+  triggers a **5-second trading block** on that pair; cancel 30 req/s.
+- **Mechanics that affect our design**: self-trade prevention per order (`smp_cancel` =
+  MAKER default / TAKER / BOTH), `time_in_force` = GTC or MOC only (so "cancel if unfilled in
+  45 s" cannot be expressed and must stay client-side), `client_order_id` ≤ 36 chars
+  `[A-Za-z0-9_-]`, and the API ships a **Deadman Switch** endpoint section.
 
-**Alternatives considered**: hardcode Rp10.000 and 0.2% — rejected: FR-053 requires venue
-data to be configuration, and this fee structure changed twice in two years.
+**Unverified — deliberately left as NULL, never guessed**:
+- **CFX fee percentage.** Only its existence and effective date (1 October 2026, SEB
+  001/SEB2026/CFX-KKI/SPOT/II/2026) are published; the breakdown page is gone and the in-app
+  *Biaya Trading* page needs a logged-in account. The earlier figures in this file
+  (0.0111% → 0.00555%) had no accessible source and are **withdrawn**.
+- **Whether `trade_fee_percent_taker` already includes tax and CFX.** No official statement.
+- **Whether a tax component is charged on the buy side.** PMK 50/2025 puts PPh on the seller;
+  the "both sides" statement in the Help Center is about the fee *adjustment*, not the tax.
+
+**Consequence for the cost model**: `venue_profile.cfx_fee_pct` is `NULL` in the seed
+(`infra/db/seeds/0001_venue_profile_indodax.sql`) and the Risk Engine must refuse to issue a
+verdict while it is `NULL`. Closing the gap is a data change from the operator's own
+All-in-Fees detail, not a code change.
+
+**Alternatives considered**: hardcode 0.2% and be done — rejected, FR-053 requires venue data
+to be configuration and this structure changed twice in two years; take the numbers from a
+blog post — rejected, no accessible source states them today.
 
 ---
 
 ## R6. Round-trip cost model per venue
 
-**Planning assumption** (must be replaced by the M0-verified numbers):
+**What is known and what is missing** — the model is a formula over `venue_profile`, never a
+constant:
 
-| Component | Rate | Applied to |
+| Component | Value | Applied to | Status |
+| --- | --- | --- | --- |
+| Service fee, taker | 0.20% (IDR market) | **entry and exit** — the default for both sides | Verified (`/api/pairs`) |
+| Service fee, maker | 0.10% (IDR market) | limit entry only, if it rests and fills | Verified, but **never the default** |
+| PPh final | 0.21% | **sell** notional only | Verified (PMK 50/2025) |
+| PPN | 0% | — | Verified (PMK 50/2025) |
+| CFX fee | **unknown** (`NULL` in the profile) | presumably both sides | Unverified |
+| Slippage allowance | 0.10% per side | entry and exit | Planning assumption (R7 measures it) |
+
+Which side pays what is decided by the *exit mechanism*, not by optimism. Stop and close
+orders are reduce-only and must fill now, so they execute against resting liquidity: the
+**exit leg is always priced at taker**. A limit entry that rests and fills as maker is a
+bonus that the cost model may not book in advance, so the default round trip is
+
+```text
+F_default = taker_buy + taker_sell + PPh_sell        # = 0.20 + 0.20 + 0.21 = 0.61% (IDR)
+```
+
+Maker pricing may only be used when a `RiskVerdict` records that the entry order was
+actually filled as maker — never as an assumption at proposal time, because a stop that
+triggers before the maker fill would then be scored against a cost the trade never paid.
+
+With round-trip friction `F` = entry fee + exit fee + tax + CFX, the net requirement is
+
+```text
+target ≥ 1.5 · (stop + F) + F        # R:R 1.5 measured after costs
+```
+
+Using only the **verified** components (taker both sides, tax on the sell) gives `F ≥ 0.61%`,
+which is a **floor, not the model** — CFX can only raise it:
+
+| Stop | Target needed at `F = 0.61%` (floor) | + slippage 0.10%/side |
 | --- | --- | --- |
-| Trading fee (all-in incl. CFX) | 0.2056% per side (0.2% + 0.00555%) | both sides |
-| PPh final (PMK 50/2025) | 0.21% | **both** sides until M0 confirms otherwise |
-| PPN | **0%** (crypto reclassified as securities under PMK 50/2025, effective 2025-08-01) | — |
-| Slippage allowance | 0.10% per side (small IDR orders, liquid pairs) | both sides |
+| 2% | ≥ 4.53% | ≥ 4.83% |
+| 5% | ≥ 9.03% | ≥ 9.33% |
 
-⇒ **Round trip ≈ 1.03%** (0.411% fees + 0.42% tax + 0.20% slippage). Conservative case if
-PPh applies only on sell: ≈ 0.83%. The Risk Engine MUST use the conservative number and
-`venue_profile.cost_model_version` must be stamped into every verdict, so that a change in
-tax law invalidates old backtests explicitly instead of silently.
+**Decision**: the Risk Engine computes `F` from the active `venue_profile` at verdict time,
+stamps `cost_model_version` + `venue_profile_id` into the verdict, and returns a refusal
+(`COST_MODEL_INCOMPLETE`) while any cost component is `NULL` in **Live**. In **Paper** and
+**Backtest** the missing components are supplied from the separately stored `*_assumed`
+columns and the verdict is stamped `cost_model_source = ASSUMED`; a Live verdict may never
+read an assumed value. No task may hard-code 0.61%, 0.81%, or any other roll-up: a change of
+one component must move every verdict, not require a code edit.
 
-**Rationale**: FR-026/FR-058 require net-of-cost R:R. With 1.03% friction, an R:R of 1.5
-after costs requires, for a 2% stop, a target ≥ 4.3%; for a 5% stop, a target ≥ 8.8%. That
-constrains the strategy (see R8) and is exactly the kind of constraint the plan must state
-before code exists.
+**Open item that blocks Live promotion**: the Lite/Pro boundary. Our 25%-of-equity position
+cap on Rp100.000 capital is a Rp25.000 order — exactly the Pro floor — while every order
+between Rp10.000 and Rp24.999 is auto-routed to Lite. Nobody has documented whether Lite
+exposes the same `order_type`, the same fee percentages, the same `min_notional`, or the same
+order rate limit as Pro. Until that is verified, the effective venue for half our trades is
+an undocumented market.
 
-**Alternatives considered**: ignoring tax (hidden 0.42% loss per round trip — larger than
-the entire 0.5% risk budget's edge at these sizes); modelling tax as sell-only without
-verification (optimistic by 0.21%, so rejected as the planning default).
+**Rationale**: FR-026/FR-058 require net-of-cost R:R. The previous 1.03% round-trip figure in
+this file was an assumption chained to an unverifiable CFX number; publishing it as fact
+would have sized every trade against a cost the system cannot substantiate.
+
+**Alternatives considered**: assume CFX 0 — rejected, it silently understates cost and is
+indistinguishable from a verified zero in the schema; assume both-sides tax (`BOTH_SIDES`) —
+rejected as the stored value, because PMK 50/2025 is explicit that the income tax falls on the
+seller; it stays an open question for the account probe rather than a silent 0.21% surcharge.
 
 ---
 
@@ -194,7 +265,8 @@ size = 500 / SL% ⇒ SL 2% → Rp25.000 (at cap), SL 5% → Rp10.000 (at venue f
 
 ⇒ **Only stop distances between 2% and 5% are expressible at this capital level.** A 1%
 stop would need Rp50.000 (rejected by FR-024), and a 6% stop would need Rp8.333 (rejected
-by FR-051 / venue minimum). Combined with R6, a valid trade needs a target ≥ 4.3% (SL 2%)
+by FR-051 / venue minimum). Combined with R6, the 2% stop sizes at the cap and the required
+target follows from the net-cost formula (R6), not from a fixed percentage here
 up to ≥ 8.8% (SL 5%) — i.e. only clean swing setups on liquid IDR pairs.
 
 Consequences the plan must accept explicitly:
@@ -369,8 +441,9 @@ evidence); third-party backtest frameworks (fees/tax models do not match Indones
 
 | Item | Blocking | Resolved by |
 | --- | --- | --- |
-| Exact Indodax all-in maker/taker %, step/tick sizes, private rate limits | M3 (first order) | M0 verification task + startup self-check against venue data |
-| Whether PPh 0.21% is charged on buy and sell or sell only | M3 (cost model) | M0: read a real fee statement / venue docs; conservative model until then |
+| Indodax CFX percentage and whether `trade_fee_percent_taker` includes tax + CFX | M3 (cost model) | **Open.** Docs do not state either (`ADR 0001` facts 6–7). Close with the operator's All-in-Fees detail, then a new `venue_profile` version. Until then `cfx_fee_pct IS NULL` and the engine refuses (`COST_MODEL_INCOMPLETE`) |
+| Whether a tax component is charged on the buy side | M3 (cost model) | **Open.** PMK 50/2025 puts PPh on the seller; stored `SELL_ONLY` (`ADR 0001` facts 8, 10). One real buy fill settles it |
+| Everything else about Indodax (stop/OCO, min order, tick, step, rate limits, fees) | — | **Resolved 2026-11-08**: `docs/adr/0001-indodax-venue-facts.md` + `infra/db/seeds/0001_venue_profile_indodax.sql` |
 | Concrete cheap/strong model IDs and prices | M1 (first LLM call) | config + `llm_price` table refreshed at M1; ledger makes drift visible |
 | Second OJK venue for the adapter conformance suite | M6 | operator choice at M6; port conformance suite already in `tests/contract` |
-| Whether Indodax exposes native stop / bracket orders (OCO), and their trigger semantics | M3 (stop placement path) | M0 verification against the trade API docs; until confirmed, `VenueCapabilities.native_stop_orders = false` and FR-067 requires the client-side stop monitor |
+| Whether Indodax exposes native stop / bracket orders (OCO) | M3 (stop placement path) | **Resolved 2026-11-08**: not exposed by the API, no OCO; UI Stop Limit is undocumented and unreachable ⇒ `native_stop_orders = false`, FR-067's client-side stop monitor is the primary mechanism (`ADR 0001` facts 1–3) |

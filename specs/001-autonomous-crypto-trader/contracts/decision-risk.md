@@ -137,10 +137,42 @@ An approved verdict is a single-use coupon, not a standing permission:
 - `consumed_at` is written in the same transaction as the `order` insert. A second
   submission for the same `verdict_id` — replay, double click, retried task, duplicate
   consumer — is refused and audited as `VERDICT_ALREADY_CONSUMED`.
-- Refusal reasons are stable strings so tests and the UI can assert them:
+- Refusal and rejection reasons are stable strings so tests and the UI can assert them:
   `VERDICT_EXPIRED`, `VERDICT_CONSUMED`, `VERDICT_SIGNATURE_INVALID`,
   `VERDICT_NOT_APPROVED`, `VERDICT_PAYLOAD_MISMATCH`, `VERDICT_UNKNOWN_ID`,
-  `MODE_NOT_TRADABLE`.
+  `MODE_NOT_TRADABLE`, `COST_MODEL_INCOMPLETE`.
+- `COST_MODEL_INCOMPLETE` is a proposal-level rejection, not a verdict, and it applies to
+  **Live only**. While any cost component of the active `venue_profile` is `NULL` (today:
+  `cfx_fee_pct`, and the buy-side tax question), Live refuses to sign anything. A venue whose
+  all-in cost is not fully known cannot be costed, and an assumed zero is indistinguishable
+  from a verified one downstream (FR-058, `docs/adr/0001-indodax-venue-facts.md`).
+
+### Assumed costs in Paper and Backtest (never in Live)
+
+| Mode | `NULL` cost component present | `cost_model_source` |
+| --- | --- | --- |
+| Live | refuse — `COST_MODEL_INCOMPLETE`, no signature | never `ASSUMED`; a profile carrying an assumed value cannot be promoted to Live |
+| Paper | proceed using the `*_assumed` columns of the same profile | `ASSUMED` on the verdict and on every consuming `rule_results` entry |
+| Backtest | same as Paper | `ASSUMED` |
+
+Four rules keep the exception from leaking:
+
+- An assumed value is stored beside the real one (`cfx_fee_pct` / `cfx_fee_pct_assumed`), never
+  substituted into it — no code path can mistake the stand-in for a fact.
+- `cost_model_source` is part of the signed payload, so a Paper verdict cannot be replayed or
+  relabelled as a Live one; `execution` also refuses an `ASSUMED` verdict outside
+  Paper/Backtest as a second, independent gate.
+- Promotion evidence reviews Paper results that carry `ASSUMED` and must say so; a Paper track
+  record built on assumed costs is not evidence for enabling Live (see the promotion gate).
+- Assumed values are deliberately pessimistic (high), because an understated cost produces
+  over-trading that looks profitable in the log and loses money at the venue.
+
+**Which side pays which fee**: the exit leg — protective stop, `CLOSE`, and the market-order
+fallback — is reduce-only and must fill now, so it is always priced at **taker**. The default
+round trip is therefore `taker_buy + taker_sell + PPh_sell` (0.20 + 0.20 + 0.21 = 0.61% on
+Indodax IDR), with maker pricing usable only when a verdict records that the entry order was
+actually filled as maker — never as an assumption at proposal time, because the stop may fire
+before the limit entry ever rests.
 - Exits do not wait for a coupon: closing a position, placing or tightening its protective
   stop, and cancelling an unfilled entry are reduce-only and proceed without a new verdict
   (FR-063). The refusal of those paths is limited to signature/lifetime of the order they

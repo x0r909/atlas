@@ -113,14 +113,16 @@ refreshed every 5 min; the pre-call guard reads the view plus in-flight reservat
 | venue_id | text FK |
 | version | int |
 | fee_maker_pct / fee_taker_pct | numeric(7,5) |
-| cfx_fee_pct | numeric(7,5) |
-| tax_pph_pct / tax_ppn_pct | numeric(7,5) |
-| tax_applies_to | enum `SELL_ONLY, BOTH_SIDES` |
-| min_notional_idr | numeric(18,2) — 10000 for Indodax |
-| min_order_step / tick_size | jsonb per pair |
-| rate_limit | jsonb `{public_rps, private_rps, burst}` |
+| cfx_fee_pct | numeric(7,5) nullable — `NULL` means "not verifiable yet", and a `NULL` here makes the Risk Engine refuse with `COST_MODEL_INCOMPLETE` (never assumed 0) |
+| cfx_fee_pct_assumed | numeric(7,5) NOT NULL — the pessimistic stand-in used **only** in Paper and Backtest while `cfx_fee_pct` is `NULL`; deliberately set high (0.10) because an understated cost is the failure that costs money |
+| tax_buy_pct_assumed | numeric(7,5) NOT NULL DEFAULT 0.21 — worst-case stand-in for the open question "is the buy side taxed too"; Paper/Backtest only |
+| tax_pph_pct / tax_ppn_pct | numeric(7,5) — 0.21 / 0 for Indodax since 2025-08-01 (PMK 50/2025) |
+| tax_applies_to | enum `SELL_ONLY, BOTH_SIDES` — `SELL_ONLY` for Indodax (PPh falls on the seller) |
+| min_notional_idr | numeric(18,2) — 10000 for Indodax (`trade_min_base_currency`); the Pro UI floor is Rp25.000 but the API accepts 10000 |
+| min_order_step / tick_size | jsonb per pair — `quantity_increment` and `pricescale` from `/api/pairs` |
+| rate_limit | jsonb `{public_rpm, private_rpm_per_endpoint, private_rpm_capital_and_fiat, create_order_rps_per_account_per_pair, cancel_rps_per_account, exceed_block_seconds, scope}` — the block seconds matter as much as the rate (see ADR 0001 fact 14) |
 | max_leverage | int — always 1 |
-| native_stop_orders | boolean — whether the venue accepts a resting stop/bracket order; `false` for Indodax until M0 proves otherwise, which selects the client-side stop monitor (FR-067) |
+| native_stop_orders | boolean — `false` for Indodax, **proven** not defaulted: the trade API has no stop order type and no OCO, so the client-side stop monitor (FR-067) is the primary protective mechanism, not a fallback |
 | cost_model_version | text |
 | verified_at | timestamptz |
 
@@ -241,7 +243,8 @@ multiple of tick size; unknown fields rejected (`model_config extra="forbid"`).
 | id uuid PK | |
 | proposal_id / management_action_id | |
 | approved bool | |
-| rule_results jsonb | array of `{rule_id, passed, observed, limit, message}` for **every** rule, not just the failing one |
+| rule_results jsonb | array of `{rule_id, passed, observed, limit, message, cost_model_source?}` for **every** rule, not just the failing one; `cost_model_source` is present only on rules that read cost components (`RR_BELOW_MIN`, and any rule whose limit is derived from fees) and is `VERIFIED` or `ASSUMED` |
+| cost_model_source | enum `VERIFIED, ASSUMED` — `ASSUMED` whenever any cost input came from a `*_assumed` column; `execution` refuses an `ASSUMED` verdict outside Paper/Backtest |
 | primary_rule_id | the blocking rule, null when approved |
 | sized_quantity, sized_notional_idr, realised_risk_idr, realised_risk_pct | |
 | rr_net | numeric(6,3) |
@@ -441,3 +444,7 @@ snapshot hashes; `incident` may reference a `decision_record` or a `reconcile_ru
     confirmed within one execution cycle (FR-033). Surviving a cycle still `UNCONFIRMED` is a
     safety breach: it raises `SAFETY/STOP_UNCONFIRMED` (`SEV1`), blocks new entries, and
     alerts the operator; `stop_unconfirmed_at` records when the state began.
+12. A Live-capable verdict is never built from an `*_assumed` column. Paper and Backtest may
+    use them and must then carry `cost_model_source='ASSUMED'` on the verdict and on every
+    `rule_results` entry that consumed a cost input; `execution` refuses an `ASSUMED` verdict
+    outside Paper/Backtest, so an assumed cost can never size a real order.
