@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "atlas-schemas"
+version = "0.1.0"
+description = "ATLAS shared pydantic v2 models - the single source of truth for every service boundary"
+requires-python = ">=3.12"
+dependencies = ["pydantic>=2.7,<3"]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "hypothesis>=6"]
+
+[tool.setuptools.packages.find]
+include = ["atlas_schemas*"]
+
+[tool.setuptools.package-data]
+atlas_schemas = ["py.typed"]
