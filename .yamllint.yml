@@ -1,0 +1,16 @@
+---
+# The repo's line budget is 100 columns (same as ruff). Docker Compose interpolation
+# strings and healthcheck one-liners legitimately exceed 80.
+extends: default
+
+rules:
+  line-length:
+    max: 100
+    allow-non-breakable-words: true
+    allow-non-breakable-inline-mappings: true
+  document-start: disable
+  comments:
+    min-spaces-from-content: 1
+  comments-indentation: disable
+  truthy:
+    allowed-values: ["true", "false", "on", "off"]

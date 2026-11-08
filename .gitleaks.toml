@@ -1,0 +1,17 @@
+# CI runs gitleaks over the whole tree, and the redaction tests must contain
+# secret-shaped strings or they prove nothing. Allow the shapes those tests use,
+# by exact value, so a real key leak anywhere else is still caught.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Synthetic secrets used by the log-redaction tests"
+paths = ['''tests/unit/test_logging_redaction\.py''']
+
+regexTarget = "match"
+regexes = [
+  '''sk_live_[0-9a-f]{32}''',
+  '''hmac-2b7f1c0d9e4a5b6c8d7e6f5a4b3c2d1e''',
+  '''JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP''',
+  '''correct-horse-battery-staple''',
+]

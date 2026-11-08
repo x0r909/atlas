@@ -1,0 +1,109 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# One workflow, five independent gates (T005). Nothing here deploys: deployment is an
+# operator action on the VPS (infra/vps/bootstrap.sh), never a CI side effect.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "22"
+
+jobs:
+  lint:
+    name: lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install "ruff>=0.8"
+      - run: ruff check .
+      - run: ruff format --check .
+
+  types:
+    name: types (mypy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: install workspace packages and type tooling
+        run: |
+          pip install -e packages/schemas -e packages/common
+          pip install "mypy>=1.13" "pydantic>=2.7,<3" "structlog>=24"
+      - run: mypy
+
+  test:
+    name: tests (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      # Unit tests need no services. Integration tests arrive with M1 and will declare a
+      # Postgres/Redis service container in this job.
+      - name: install workspace packages and test tooling
+        run: |
+          pip install -e packages/schemas -e packages/common
+          pip install pytest pytest-asyncio hypothesis time-machine respx
+      - run: pytest -m "not integration and not chaos"
+        env:
+          ATLAS_MODE: PAPER
+
+  terminal:
+    name: terminal (typecheck)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/terminal-web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: apps/terminal-web/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+
+  security:
+    name: security (deps + leaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: dependency audit
+        run: |
+          pip install pip-audit
+          pip-audit -r infra/db/requirements.txt
+      - name: credential scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  docs:
+    name: docs (markdownlint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - run: npx --yes markdownlint-cli2 "**/*.md" "#node_modules" "#.venv"

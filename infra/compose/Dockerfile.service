@@ -1,0 +1,35 @@
+# One image definition for every Python service.
+#
+# The service name is a build argument rather than nine near-identical Dockerfiles, so a
+# dependency or base-image change lands in one place. The image contains the two shared
+# packages plus exactly one service package: a service cannot import another service's code
+# because the code is not there (constitution I, and T066's import-boundary test).
+FROM python:3.12-slim AS base
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+ARG SERVICE
+RUN test -n "$SERVICE" || (echo "SERVICE build arg is required" >&2; exit 2)
+
+WORKDIR /app
+
+COPY packages/schemas /app/packages/schemas
+COPY packages/common /app/packages/common
+
+RUN pip install /app/packages/schemas /app/packages/common
+
+COPY services/${SERVICE} /app/services/${SERVICE}
+RUN pip install /app/services/${SERVICE}
+
+# Non-root, no login shell: nothing in a service needs to be interactive.
+RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin atlas
+USER 10001
+
+ENV ATLAS_MODE=PAPER
+
+# Services run as `python -m <package>`, so there is no console-script name to collide
+# across images and the entry point is greppable.
+ENTRYPOINT ["python", "-m"]

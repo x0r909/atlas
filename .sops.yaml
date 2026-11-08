@@ -1,0 +1,7 @@
+# sops + age. Encrypted files under infra/age/ are the source of truth and are safe to
+# commit; plaintext never enters the tree. Replace the placeholder recipient with the host's
+# public key (`age-keygen -y /etc/atlas/age.key`) before encrypting anything real.
+creation_rules:
+  - path_regex: ^infra/age/.*\.sops\.ya?ml$
+    encrypted_regex: "^(data|stringData)$"
+    age: age1__REPLACE_WITH_THE_HOST_PUBLIC_KEY__

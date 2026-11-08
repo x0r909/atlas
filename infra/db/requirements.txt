@@ -1,0 +1,4 @@
+# Tooling for the migration runner only. Services declare their own dependencies.
+alembic==1.14.0
+SQLAlchemy[asyncio]==2.0.36
+asyncpg==0.30.0

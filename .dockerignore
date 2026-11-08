@@ -1,0 +1,11 @@
+.git
+.venv
+node_modules
+**/node_modules
+apps/terminal-web/.next
+**/__pycache__
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+specs
+docs

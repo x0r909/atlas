@@ -1,0 +1,22 @@
+# Nightly logical backup. Kept as a separate unit rather than a cron line so failures land
+# in the journal and in `systemctl status`, and so the timer survives a reboot.
+[Unit]
+Description=ATLAS database backup
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=postgres
+Group=postgres
+# systemd creates and owns /var/lib/atlas-backup, so the nightly dump does not
+# depend on any root-owned parent directory being writable by the postgres user.
+StateDirectory=atlas-backup
+StateDirectoryMode=0700
+EnvironmentFile=/run/atlas/backup.env
+ExecStart=/opt/atlas/infra/vps/backup.sh
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

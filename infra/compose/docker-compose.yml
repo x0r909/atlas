@@ -1,0 +1,180 @@
+---
+# Local and single-VPS compose stack (M0).
+#
+# TimescaleDB + pgvector is the single database; Redis is the bus. The nine
+# application services sit behind the `app` profile because at M0 they are
+# skeletons: `docker compose up` on a fresh clone must start infrastructure
+# only, not nine services that cannot run yet.
+name: atlas
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  timescaledb:
+    # The -ha variant bundles pgvector, which the embedding tables need at M6.
+    image: timescale/timescaledb-ha:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-atlas}
+      POSTGRES_USER: ${POSTGRES_USER:-atlas}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    volumes:
+      - timescale-data:/home/postgres/pgdata/data
+      - ../db/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      # Loopback only: the database is never reachable from the internet.
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          pg_isready -U ${POSTGRES_USER:-atlas}
+          -d ${POSTGRES_DB:-atlas}
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    logging: *default-logging
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    # noeviction is deliberate: an evicted stream entry is a lost order or a
+    # lost verdict. The 384 MB cap is the plan's budget for the LXC.
+    command:
+      - redis-server
+      - --maxmemory
+      - 384mb
+      - --maxmemory-policy
+      - noeviction
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --requirepass
+      - ${REDIS_PASSWORD:?required}
+    volumes:
+      - redis-data:/data
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test:
+        - CMD
+        - redis-cli
+        - --no-auth-warning
+        - -a
+        - ${REDIS_PASSWORD}
+        - ping
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    logging: *default-logging
+
+  # --- application services (profile: app) ---------------------------------
+  # One process per job (plan.md Structure Decision). Only `execution` will
+  # ever hold venue credentials (FR-064); the secret mount is added and tested
+  # in T062/T063.
+  ingest-market:
+    profiles: ["app"]
+    build:
+      context: ../..
+      dockerfile: infra/compose/Dockerfile.service
+      args: {SERVICE: ingest-market}
+    <<: &app-service
+      restart: unless-stopped
+      environment:
+        ATLAS_MODE: PAPER
+        # Double-quoted with a trailing backslash so the URL stays one scalar
+        # while the physical line stays inside the 80-column YAML budget.
+        ATLAS_DB_DSN: "postgresql+asyncpg://${POSTGRES_USER:-atlas}:\
+          ${POSTGRES_PASSWORD}@timescaledb:5432/${POSTGRES_DB:-atlas}"
+        ATLAS_REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379/0"
+        ATLAS_LOG_LEVEL: INFO
+      depends_on:
+        timescaledb: {condition: service_healthy}
+        redis: {condition: service_healthy}
+      logging: *default-logging
+    command: ["atlas_ingest_market"]
+
+  ingest-news:
+    profiles: ["app"]
+    build:
+      context: ../..
+      dockerfile: infra/compose/Dockerfile.service
+      args: {SERVICE: ingest-news}
+    <<: *app-service
+    command: ["atlas_ingest_news"]
+
+  feature-engine:
+    profiles: ["app"]
+    build:
+      context: ../..
+      dockerfile: infra/compose/Dockerfile.service
+      args: {SERVICE: feature-engine}
+    <<: *app-service
+    command: ["atlas_feature_engine"]
+
+  agents:
+    profiles: ["app"]
+    build:
+      context: ../..
+      dockerfile: infra/compose/Dockerfile.service
+      args: {SERVICE: agents}
+    <<: *app-service
+    command: ["atlas_agents"]
+
+  risk-engine:
+    profiles: ["app"]
+    build:
+      context: ../..
+      dockerfile: infra/compose/Dockerfile.service
+      args: {SERVICE: risk-engine}
+    <<: *app-service
+    command: ["atlas_risk_engine"]
+
+  execution:
+    profiles: ["app"]
+    build:
+      context: ../..
+      dockerfile: infra/compose/Dockerfile.service
+      args: {SERVICE: execution}
+    <<: *app-service
+    command: ["atlas_execution"]
+
+  stop-monitor:
+    profiles: ["app"]
+    build:
+      context: ../..
+      dockerfile: infra/compose/Dockerfile.service
+      args: {SERVICE: stop-monitor}
+    <<: *app-service
+    command: ["atlas_stopmon"]
+
+  backtester:
+    profiles: ["app"]
+    build:
+      context: ../..
+      dockerfile: infra/compose/Dockerfile.service
+      args: {SERVICE: backtester}
+    <<: *app-service
+    command: ["atlas_backtester"]
+
+  api-gateway:
+    profiles: ["app"]
+    build:
+      context: ../..
+      dockerfile: infra/compose/Dockerfile.service
+      args: {SERVICE: api-gateway}
+    <<: *app-service
+    command: ["atlas_api"]
+    ports:
+      # Only the gateway is reachable from outside, and only over Tailscale.
+      - "127.0.0.1:8080:8080"
+
+volumes:
+  timescale-data:
+  redis-data:

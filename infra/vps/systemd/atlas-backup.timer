@@ -1,0 +1,13 @@
+[Unit]
+Description=Run the ATLAS database backup nightly
+
+[Timer]
+# 19:00 UTC = 02:00 WIB: after the trading day closes at 00:00 WIB, before the
+# operator's morning, and outside any interesting market window.
+OnCalendar=*-*-* 19:00:00 UTC
+RandomizedDelaySec=300
+Persistent=true
+Unit=atlas-backup.service
+
+[Install]
+WantedBy=timers.target

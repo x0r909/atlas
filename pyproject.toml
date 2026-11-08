@@ -1,0 +1,123 @@
+[project]
+name = "atlas-workspace"
+version = "0.0.0"
+description = "ATLAS autonomous crypto trader - workspace tooling (not deployable)"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+# Tooling only. This workspace package is never installed or deployed; each package/
+# and services/* declares its own runtime dependencies.
+dev = [
+  "ruff>=0.8",
+  "mypy>=1.13",
+  "pytest>=8",
+  "pytest-asyncio>=0.24",
+  "hypothesis>=6",
+  "respx>=0.22",
+  "time-machine>=2.13",
+  "alembic>=1.14",
+  "SQLAlchemy[asyncio]>=2.0.36",
+  "asyncpg>=0.30",
+]
+
+# Every runtime dependency lives in the package or service that needs it.
+# This file only carries the tool configuration shared by the whole repo.
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+# Spec Kit artefacts are not Python source: `ruff format` rewrites code blocks inside
+# markdown, which would reformat reviewed contracts as a side effect of formatting the repo.
+extend-exclude = [
+  ".venv",
+  "node_modules",
+  "apps",
+  "specs",
+  "infra/db/versions",
+]
+
+[tool.ruff.lint]
+select = [
+  "E",   # pycodestyle errors
+  "F",   # pyflakes
+  "I",   # import sorting
+  "UP",  # pyupgrade
+  "B",   # bugbear
+  "SIM", # simplify
+  "S",   # bandit-style security
+  "RUF",
+]
+ignore = [
+  "S101", # assert is how tests work
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106", "S108"]        # fake secrets and tmp paths in tests
+"infra/db/versions/**" = ["E501", "I001"]    # generated migrations
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+strict_equality = true
+show_error_codes = true
+# Strict everywhere in the two packages that carry money and orders; the rest tightens later.
+# Service packages join this list when their code lands (M1+): mypy refuses a directory
+# that contains no Python yet, and an empty target would hide a real misconfiguration.
+files = ["packages", "tests"]
+ignore_missing_imports = false
+# The workspace packages are importable from the tree (same paths pytest uses), so mypy
+# resolves `atlas_common.*` without an editable install.
+mypy_path = ["packages/common", "packages/schemas"]
+
+[[tool.mypy.overrides]]
+module = ["packages.schemas.*", "atlas_schemas.*", "atlas_common.*"]
+strict = true
+
+[[tool.mypy.overrides]]
+# Test modules are typed loosely on purpose: they assert behaviour, and a cast in a test
+# hides the bug the test exists to catch.
+module = ["tests.*"]
+strict = false
+disallow_untyped_defs = false
+disallow_untyped_calls = false
+
+[[tool.mypy.overrides]]
+# structlog is an optional extra of atlas-common; when it is not installed the module
+# falls back to stdlib logging, so a missing stub is expected rather than an error.
+module = ["structlog", "structlog.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# Services other than risk-engine/execution are not strict yet (M1+).
+module = [
+  "atlas_ingest_market.*",
+  "atlas_ingest_news.*",
+  "atlas_feature_engine.*",
+  "atlas_agents.*",
+  "atlas_stopmon.*",
+  "atlas_backtester.*",
+  "atlas_api.*",
+]
+ignore_errors = true
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+# Packages are importable straight from the tree so a test run never needs an install step.
+pythonpath = ["packages/common", "packages/schemas", "."]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-q --strict-markers --strict-config"
+markers = [
+  "chaos: destructive failure-injection tests (constitution IX)",
+  "contract: venue-port conformance suite",
+  "integration: needs Postgres/Redis or a simulated venue",
+  "security: asserts a security property, not a behaviour",
+]
+
+[tool.coverage.run]
+source = ["packages", "services"]
+omit = ["*/tests/*", "infra/db/versions/*"]

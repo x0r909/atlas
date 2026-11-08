@@ -1,0 +1,23 @@
+{
+  "include": [
+    "packages",
+    "services",
+    "tests"
+  ],
+  "exclude": [
+    "**/node_modules",
+    "**/.venv",
+    "apps/terminal-web/.next"
+  ],
+  "pythonVersion": "3.12",
+  "pythonPlatform": "Linux",
+  "typeCheckingMode": "basic",
+  "extraPaths": [
+    "packages/common",
+    "packages/schemas"
+  ],
+  "reportMissingImports": "error",
+  "reportMissingTypeStubs": "none",
+  "venvPath": ".",
+  "venv": ".venv"
+}

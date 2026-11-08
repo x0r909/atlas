@@ -1,0 +1,43 @@
+# One template unit for every Python service. The instance name IS the importable module:
+#
+#   systemctl start atlas@atlas_ingest_market
+#
+# which runs `/opt/atlas/.venv/bin/python -m atlas_ingest_market`. Keeping the module as the
+# instance name means `systemctl list-units 'atlas@*'` reads as a service inventory, and
+# there is no second name to keep in sync with the package.
+[Unit]
+Description=ATLAS service %i
+After=network-online.target atlas-render-credentials.service
+Wants=network-online.target
+PartOf=atlas.target
+
+[Service]
+Type=simple
+User=atlas
+Group=atlas
+WorkingDirectory=/opt/atlas
+Environment=PYTHONUNBUFFERED=1
+Environment=ATLAS_MODE=PAPER
+# A service starts only after its rendered runtime file exists; a service without its
+# settings must not come up half-configured.
+ExecStartPre=/usr/bin/test -r /run/atlas/%i.env
+EnvironmentFile=/run/atlas/%i.env
+ExecStart=/opt/atlas/.venv/bin/python -m %i
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+
+# Sandboxing: services never need write access outside their own tmpfs and /run/atlas.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+ReadWritePaths=/run/atlas
+
+[Install]
+WantedBy=atlas.target

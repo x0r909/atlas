@@ -1,0 +1,21 @@
+# Groups the ATLAS services so `systemctl start atlas.target` starts the stack and
+# `systemctl stop atlas.target` stops all of it (PartOf= in atlas@.service).
+#
+# Entries stay commented until the corresponding package exists (M1+). Enabling a unit whose
+# module does not exist gives a crash loop, which is noise rather than information.
+[Unit]
+Description=ATLAS trading system
+Wants=atlas-render-credentials.service
+After=network-online.target
+
+[Install]
+WantedBy=multi-user.target
+
+# Wants=atlas@atlas_ingest_market.service
+# Wants=atlas@atlas_ingest_news.service
+# Wants=atlas@atlas_feature_engine.service
+# Wants=atlas@atlas_agents.service
+# Wants=atlas@atlas_risk_engine.service
+# Wants=atlas@atlas_execution.service
+# Wants=atlas@atlas_stopmon.service
+# Wants=atlas@atlas_api.service
