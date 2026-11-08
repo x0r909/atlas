@@ -9,7 +9,7 @@ description = "ATLAS shared runtime helpers: config, logging, clock, money, stre
 requires-python = ">=3.12"
 # Deliberately light: money, clock and config must be testable with the standard library
 # alone. structlog is optional and falls back to stdlib logging when absent.
-dependencies = []
+dependencies = ["atlas-schemas"]
 
 [project.optional-dependencies]
 logging = ["structlog>=24"]
@@ -21,3 +21,7 @@ include = ["atlas_common*"]
 
 [tool.setuptools.package-data]
 atlas_common = ["py.typed"]
+
+[tool.mypy]
+python_executable = "../../.venv/bin/python"
+mypy_path = ["../../packages/common", "../../packages/schemas"]
