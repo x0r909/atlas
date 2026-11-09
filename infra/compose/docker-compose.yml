@@ -1,10 +1,16 @@
 ---
-# Local and single-VPS compose stack (M0).
+# Local and single-VPS compose stack (M0+).
 #
 # TimescaleDB + pgvector is the single database; Redis is the bus. The nine
-# application services sit behind the `app` profile because at M0 they are
-# skeletons: `docker compose up` on a fresh clone must start infrastructure
+# application services sit behind the `app` profile because at M3 they are only
+# partly runnable: `docker compose up` on a fresh clone must start infrastructure
 # only, not nine services that cannot run yet.
+#
+# Credential boundary (FR-064, docs/adr/0002-credential-boundary.md):
+#   * execution is the only process that receives venue key material;
+#   * inspection of the whole file is tested in tests/security/test_credential_isolation.py;
+#   * every secret arrives as a file under /run/secrets, never as an environment value,
+#     because `environment:` is visible in `docker inspect` and in any crash dump.
 name: atlas
 
 x-logging: &default-logging
@@ -12,6 +18,23 @@ x-logging: &default-logging
   options:
     max-size: "10m"
     max-file: "3"
+
+# Shared, non-secret configuration. A service opts into more only by naming it.
+x-common-env: &common-env
+  ATLAS_MODE: PAPER
+  # Double-quoted with a trailing backslash so the URL stays one scalar while the
+  # physical line stays inside the 80-column YAML budget.
+  ATLAS_DB_DSN: "postgresql+asyncpg://${POSTGRES_USER:-atlas}:\
+    ${POSTGRES_PASSWORD}@timescaledb:5432/${POSTGRES_DB:-atlas}"
+  ATLAS_REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379/0"
+  ATLAS_LOG_LEVEL: INFO
+
+x-app-service: &app-service
+  restart: unless-stopped
+  depends_on:
+    timescaledb: {condition: service_healthy}
+    redis: {condition: service_healthy}
+  logging: *default-logging
 
 services:
   timescaledb:
@@ -75,29 +98,17 @@ services:
     logging: *default-logging
 
   # --- application services (profile: app) ---------------------------------
-  # One process per job (plan.md Structure Decision). Only `execution` will
-  # ever hold venue credentials (FR-064); the secret mount is added and tested
-  # in T062/T063.
   ingest-market:
     profiles: ["app"]
     build:
       context: ../..
       dockerfile: infra/compose/Dockerfile.service
       args: {SERVICE: ingest-market}
-    <<: &app-service
-      restart: unless-stopped
-      environment:
-        ATLAS_MODE: PAPER
-        # Double-quoted with a trailing backslash so the URL stays one scalar
-        # while the physical line stays inside the 80-column YAML budget.
-        ATLAS_DB_DSN: "postgresql+asyncpg://${POSTGRES_USER:-atlas}:\
-          ${POSTGRES_PASSWORD}@timescaledb:5432/${POSTGRES_DB:-atlas}"
-        ATLAS_REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379/0"
-        ATLAS_LOG_LEVEL: INFO
-      depends_on:
-        timescaledb: {condition: service_healthy}
-        redis: {condition: service_healthy}
-      logging: *default-logging
+    <<: *app-service
+    environment:
+      <<: *common-env
+    # Public market data only. No key, no private endpoint.
+    x-egress: {enforced_by: docker-network, hosts: ["indodax.com"]}
     command: ["atlas_ingest_market"]
 
   ingest-news:
@@ -107,6 +118,19 @@ services:
       dockerfile: infra/compose/Dockerfile.service
       args: {SERVICE: ingest-news}
     <<: *app-service
+    environment:
+      <<: *common-env
+    x-egress:
+      enforced_by: docker-network
+      hosts:
+        - coindesk.com
+        - cointelegraph.com
+        - decrypt.co
+        - theblock.co
+        - bitcoinmagazine.com
+        - cryptoslate.com
+        - coinvestasi.com
+        - ojk.go.id
     command: ["atlas_ingest_news"]
 
   feature-engine:
@@ -116,6 +140,9 @@ services:
       dockerfile: infra/compose/Dockerfile.service
       args: {SERVICE: feature-engine}
     <<: *app-service
+    environment:
+      <<: *common-env
+    x-egress: {enforced_by: none-required, hosts: []}
     command: ["atlas_feature_engine"]
 
   agents:
@@ -125,6 +152,13 @@ services:
       dockerfile: infra/compose/Dockerfile.service
       args: {SERVICE: agents}
     <<: *app-service
+    environment:
+      <<: *common-env
+      # The only credential an agent process may see: the model provider key.
+      ATLAS_LLM_API_KEY_FILE: /run/secrets/llm_api_key
+    secrets: [llm_api_key]
+    # The provider host is fixed in Phase 9 (T091); until then it is not routable.
+    x-egress: {enforced_by: docker-network, hosts: ["llm-provider.invalid"]}
     command: ["atlas_agents"]
 
   risk-engine:
@@ -134,6 +168,12 @@ services:
       dockerfile: infra/compose/Dockerfile.service
       args: {SERVICE: risk-engine}
     <<: *app-service
+    environment:
+      <<: *common-env
+      # Signing key only: a verdict can be produced here but no order placed from here.
+      ATLAS_ORDER_HMAC_KEY_FILE: /run/secrets/order_hmac_key
+    secrets: [order_hmac_key]
+    x-egress: {enforced_by: none-required, hosts: []}
     command: ["atlas_risk_engine"]
 
   execution:
@@ -143,6 +183,14 @@ services:
       dockerfile: infra/compose/Dockerfile.service
       args: {SERVICE: execution}
     <<: *app-service
+    environment:
+      <<: *common-env
+      ATLAS_INDODAX_API_KEY_FILE: /run/secrets/indodax_api_key
+      ATLAS_INDODAX_API_SECRET_FILE: /run/secrets/indodax_api_secret
+      # Execution re-checks the signature, so it needs the same key as risk-engine.
+      ATLAS_ORDER_HMAC_KEY_FILE: /run/secrets/order_hmac_key
+    secrets: [indodax_api_key, indodax_api_secret, order_hmac_key]
+    x-egress: {enforced_by: docker-network, hosts: ["indodax.com"]}
     command: ["atlas_execution"]
 
   stop-monitor:
@@ -152,6 +200,10 @@ services:
       dockerfile: infra/compose/Dockerfile.service
       args: {SERVICE: stop-monitor}
     <<: *app-service
+    environment:
+      <<: *common-env
+    # The stop monitor routes every mutation through execution; it calls no venue itself.
+    x-egress: {enforced_by: none-required, hosts: []}
     command: ["atlas_stopmon"]
 
   backtester:
@@ -161,6 +213,9 @@ services:
       dockerfile: infra/compose/Dockerfile.service
       args: {SERVICE: backtester}
     <<: *app-service
+    environment:
+      <<: *common-env
+    x-egress: {enforced_by: none-required, hosts: []}
     command: ["atlas_backtester"]
 
   api-gateway:
@@ -170,10 +225,29 @@ services:
       dockerfile: infra/compose/Dockerfile.service
       args: {SERVICE: api-gateway}
     <<: *app-service
+    environment:
+      <<: *common-env
+      # The gateway may alert the operator, and may do nothing else on the network.
+      ATLAS_TELEGRAM_BOT_TOKEN_FILE: /run/secrets/telegram_bot_token
+    secrets: [telegram_bot_token]
+    x-egress: {enforced_by: docker-network, hosts: ["api.telegram.org"]}
     command: ["atlas_api"]
     ports:
       # Only the gateway is reachable from outside, and only over Tailscale.
       - "127.0.0.1:8080:8080"
+
+# Files live outside the repository by construction: a checkout never contains a secret.
+secrets:
+  indodax_api_key:
+    file: /etc/atlas/secrets/indodax_api_key
+  indodax_api_secret:
+    file: /etc/atlas/secrets/indodax_api_secret
+  order_hmac_key:
+    file: /etc/atlas/secrets/order_hmac_key
+  llm_api_key:
+    file: /etc/atlas/secrets/llm_api_key
+  telegram_bot_token:
+    file: /etc/atlas/secrets/telegram_bot_token
 
 volumes:
   timescale-data:
