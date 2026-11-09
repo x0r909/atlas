@@ -11,6 +11,7 @@ mypy_path = [
   "../services/ingest-market",
   "../services/ingest-news",
   "../services/feature-engine",
+  "../services/risk-engine",
 ]
 explicit_package_bases = true
 namespace_packages = true

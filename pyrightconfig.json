@@ -21,7 +21,8 @@
     "services/api-gateway",
     "services/ingest-market",
     "services/ingest-news",
-    "services/feature-engine"
+    "services/feature-engine",
+    "services/risk-engine"
   ],
   "reportMissingImports": "error",
   "reportMissingTypeStubs": "none",

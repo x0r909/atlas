@@ -1,0 +1,21 @@
+{
+  "include": ["."],
+  "exclude": ["**/__pycache__"],
+  "pythonVersion": "3.12",
+  "pythonPlatform": "Linux",
+  "typeCheckingMode": "basic",
+  "venvPath": "..",
+  "venv": ".venv",
+  "extraPaths": [
+    "../packages/common",
+    "../packages/schemas",
+    "../services/execution",
+    "../services/api-gateway",
+    "../services/ingest-market",
+    "../services/ingest-news",
+    "../services/feature-engine",
+    "../services/risk-engine"
+  ],
+  "reportMissingImports": "error",
+  "reportMissingTypeStubs": "none"
+}
