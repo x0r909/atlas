@@ -50,13 +50,19 @@ class PairInfo(_Model):
 
 class Ticker(_Model):
     pair: str
-    bid: Decimal
-    ask: Decimal
-    bid_size: Decimal
-    ask_size: Decimal
-    last: Decimal
+    bid: Decimal = Field(gt=0)
+    ask: Decimal = Field(gt=0)
+    bid_size: Decimal = Field(ge=0)
+    ask_size: Decimal = Field(ge=0)
+    last: Decimal = Field(gt=0)
     venue_ts: int
     ingested_at: int
+
+    @model_validator(mode="after")
+    def _not_crossed(self) -> Ticker:
+        if self.bid > self.ask:
+            raise ValueError("ticker bid above ask")
+        return self
 
 
 class OrderBook(_Model):
@@ -83,8 +89,8 @@ class OrderBook(_Model):
 class PublicTrade(_Model):
     pair: str
     trade_id: str
-    price: Decimal
-    quantity: Decimal
+    price: Decimal = Field(gt=0)
+    quantity: Decimal = Field(gt=0)
     side: Literal["BUY", "SELL"]
     venue_ts: int
 
@@ -93,12 +99,21 @@ class Bar(_Model):
     pair: str
     timeframe: str
     ts: int
-    open: Decimal
-    high: Decimal
-    low: Decimal
-    close: Decimal
-    volume: Decimal
+    open: Decimal = Field(gt=0)
+    high: Decimal = Field(gt=0)
+    low: Decimal = Field(gt=0)
+    close: Decimal = Field(gt=0)
+    volume: Decimal = Field(ge=0)
     trade_count: int | None = None
+
+    @model_validator(mode="after")
+    def _ohlc_coherent(self) -> Bar:
+        """A bar that contradicts itself would corrupt every later indicator."""
+        if self.high < max(self.open, self.close, self.low):
+            raise ValueError("bar high is below its own open/close/low")
+        if self.low > min(self.open, self.close, self.high):
+            raise ValueError("bar low is above its own open/close/high")
+        return self
 
 
 class Balance(_Model):

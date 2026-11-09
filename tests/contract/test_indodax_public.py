@@ -22,6 +22,7 @@ from atlas_schemas.venue import (
     VenueSchemaError,
     VenueUnavailable,
 )
+from atlas_schemas.venue_port import VenuePort, assert_port_surface
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "indodax"
 
@@ -114,10 +115,15 @@ async def test_a_transport_failure_is_unavailable_not_a_crash(venue):
             await venue.pairs()
 
 
-async def test_a_non_json_body_is_a_schema_error(venue):
+async def test_a_non_json_body_is_an_outage_not_a_market_event(venue):
+    """A maintenance page is the venue being down, not the venue saying something odd.
+
+    Retrying with backoff is right for an outage and wrong for a schema break, so the two
+    must not share an exception.
+    """
     with respx.mock(base_url=REST_BASE) as mock:
         mock.get("/api/ticker_all").mock(return_value=httpx.Response(200, text="<html>maintenance"))
-        with pytest.raises(VenueSchemaError):
+        with pytest.raises(VenueUnavailable):
             await venue.tickers()
 
 
@@ -128,8 +134,8 @@ async def test_tickers_keep_only_the_requested_pairs_and_both_sides(venue):
         )
         tickers = await venue.tickers(["btc_idr"])
 
-    assert set(tickers) == {"btc_idr"}
-    ticker = tickers["btc_idr"]
+    assert {ticker.pair for ticker in tickers} == {"btc_idr"}
+    ticker = tickers[0]
     assert ticker.bid == Decimal("1035000000")
     assert ticker.ask == Decimal("1035500000")
     assert ticker.bid < ticker.ask
@@ -215,3 +221,80 @@ async def test_an_unsupported_timeframe_never_reaches_the_venue(venue):
 async def test_private_calls_refuse_instead_of_pretending(venue, call):
     with pytest.raises(VenueAuthError):
         await call(venue)
+
+
+async def test_a_ticker_that_crosses_itself_is_refused(venue):
+    crossed = {"tickers": {"btc_idr": {"buy": "1036000000", "sell": "1035000000", "last": "1"}}}
+    with respx.mock(base_url=REST_BASE) as mock:
+        mock.get("/api/ticker_all").mock(return_value=httpx.Response(200, json=crossed))
+        with pytest.raises(VenueSchemaError, match="failed validation"):
+            await venue.tickers()
+
+
+async def test_an_infinite_price_is_a_schema_break(venue):
+    broken = {"tickers": {"btc_idr": {"buy": "Infinity", "sell": "1", "last": "1"}}}
+    with respx.mock(base_url=REST_BASE) as mock:
+        mock.get("/api/ticker_all").mock(return_value=httpx.Response(200, json=broken))
+        with pytest.raises(VenueSchemaError, match="finite"):
+            await venue.tickers()
+
+
+async def test_an_empty_ticker_list_is_an_outage(venue):
+    with respx.mock(base_url=REST_BASE) as mock:
+        mock.get("/api/ticker_all").mock(return_value=httpx.Response(200, json={"tickers": {}}))
+        with pytest.raises(VenueUnavailable, match="no rows"):
+            await venue.tickers()
+
+
+async def test_an_absurd_retry_after_is_clamped(venue):
+    with respx.mock(base_url=REST_BASE) as mock:
+        mock.get("/api/ticker_all").mock(
+            return_value=httpx.Response(429, headers={"retry-after": "999999"})
+        )
+        with pytest.raises(VenueRateLimited) as raised:
+            await venue.tickers()
+    assert raised.value.retry_after_s == 300.0
+
+
+async def test_a_503_keeps_the_retry_hint(venue):
+    with respx.mock(base_url=REST_BASE) as mock:
+        mock.get("/api/ticker_all").mock(
+            return_value=httpx.Response(503, headers={"retry-after": "7"})
+        )
+        with pytest.raises(VenueUnavailable, match=r"retry after 7\.0s"):
+            await venue.tickers()
+
+
+async def test_an_unsorted_book_is_a_schema_break(venue):
+    book = {
+        "buy": [["1035000000", "0.1"]],
+        "sell": [["1036000000", "0.1"], ["1035500000", "0.1"]],
+    }
+    with respx.mock(base_url=REST_BASE) as mock:
+        mock.get("/api/depth/btc_idr").mock(return_value=httpx.Response(200, json=book))
+        with pytest.raises(VenueSchemaError, match="out of order"):
+            await venue.order_book("btc_idr")
+
+
+async def test_a_one_sided_book_is_a_schema_break(venue):
+    book = {"buy": [["1035000000", "0.1"]], "sell": []}
+    with respx.mock(base_url=REST_BASE) as mock:
+        mock.get("/api/depth/btc_idr").mock(return_value=httpx.Response(200, json=book))
+        with pytest.raises(VenueSchemaError, match="empty side"):
+            await venue.order_book("btc_idr")
+
+
+async def test_an_unknown_trade_side_is_a_schema_break(venue):
+    trades = [{"tid": 1, "price": "1", "amount": "1", "type": "auction", "date": 1717996800}]
+    with respx.mock(base_url=REST_BASE) as mock:
+        mock.get("/api/trades/btc_idr").mock(return_value=httpx.Response(200, json=trades))
+        with pytest.raises(VenueSchemaError, match="side"):
+            await venue.recent_trades("btc_idr")
+
+
+def test_the_adapter_declares_the_whole_port_surface(venue):
+    """The Protocol is structural; a missing method must fail here, not at the call site."""
+    assert isinstance(venue, VenuePort)
+    assert_port_surface(type(venue))
+    assert venue.capabilities().markets == ["SPOT"]
+    assert venue.profile().max_leverage == 1

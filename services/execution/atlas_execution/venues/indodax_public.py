@@ -15,13 +15,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Literal
 
 import httpx
-from atlas_common.ratelimit import RateLimiter
+from atlas_common.ratelimit import RateLimiter, RateLimitExceeded
 from atlas_schemas.events import EventEnvelope
 from atlas_schemas.venue import (
     Balance,
@@ -50,6 +51,12 @@ REST_BASE = "https://indodax.com"
 HISTORY_URL = "https://indodax.com/tradingview/history"
 
 # Chart resolutions are expressed in minutes for intraday frames; Indodax uses "1D" for daily.
+MAX_RETRY_AFTER_S = 300.0
+
+# Indodax spells its sides in lower case and with no third option; an unknown value is a
+# schema break, not something to guess at.
+SIDES: dict[str, Literal["BUY", "SELL"]] = {"buy": "BUY", "sell": "SELL"}
+
 RESOLUTIONS = {"1m": "1", "5m": "5", "15m": "15", "1h": "60", "4h": "240", "1d": "1D"}
 
 INDOdax_PROFILE = VenueProfile(
@@ -70,6 +77,21 @@ INDOdax_PROFILE = VenueProfile(
 )
 
 
+_CAPABILITIES = VenueCapabilities(
+    venue_id=VENUE_ID,
+    quote_currencies=["IDR"],
+    markets=["SPOT"],
+    supports_ws_public=True,
+    supports_ws_private=False,
+    supports_client_order_id=False,
+    self_trade_prevention=False,
+    native_stop_orders=False,
+    supports_order_modify=False,
+    max_leverage=1,
+    regulator="BAPPEBTI_LEGACY",
+)
+
+
 def _retry_after_s(raw: str | None) -> float:
     """A hostile or absent Retry-After header must not crash the caller."""
     if not raw:
@@ -78,14 +100,21 @@ def _retry_after_s(raw: str | None) -> float:
         value = float(raw)
     except ValueError:
         return 1.0
-    return value if value > 0 else 1.0
+    if not math.isfinite(value):
+        return 1.0
+    # A one-year Retry-After would park the ingestion for a year; clamp to something the
+    # scheduler can still reason about.
+    return min(max(value, 1.0), MAX_RETRY_AFTER_S)
 
 
 def _dec(value: Any, field: str) -> Decimal:
     try:
-        return Decimal(str(value))
+        number = Decimal(str(value))
     except (InvalidOperation, TypeError, ValueError) as exc:
         raise VenueSchemaError(f"{field}: not a number ({value!r})") from exc
+    if not number.is_finite():
+        raise VenueSchemaError(f"{field}: not a finite number ({value!r})")
+    return number
 
 
 def _ts_ms(value: Any, field: str) -> int:
@@ -99,19 +128,12 @@ def _ts_ms(value: Any, field: str) -> int:
 
 class IndodaxPublicVenue:
     venue_id = VENUE_ID
-    capabilities = VenueCapabilities(
-        venue_id=VENUE_ID,
-        quote_currencies=["IDR"],
-        markets=["SPOT"],
-        supports_ws_public=True,
-        supports_ws_private=False,
-        supports_client_order_id=False,
-        self_trade_prevention=False,
-        native_stop_orders=False,
-        supports_order_modify=False,
-        max_leverage=1,
-        regulator="BAPPEBTI_LEGACY",
-    )
+
+    def capabilities(self) -> VenueCapabilities:
+        return _CAPABILITIES
+
+    def profile(self) -> VenueProfile:
+        return self._profile
 
     def __init__(
         self,
@@ -121,7 +143,7 @@ class IndodaxPublicVenue:
         profile: VenueProfile = INDOdax_PROFILE,
         timeout_s: float = 10.0,
     ) -> None:
-        self.profile = profile
+        self._profile = profile
         self._limiter = limiter
         self._client = client
         self._owns_client = client is None
@@ -143,7 +165,13 @@ class IndodaxPublicVenue:
 
     async def _get_json(self, path: str, *, key: str, params: dict[str, Any] | None = None) -> Any:
         if self._limiter is not None:
-            await self._limiter.acquire("public", key=key)
+            try:
+                await self._limiter.acquire("public", key="public", wait=True)
+            except RateLimitExceeded as exc:
+                raise VenueRateLimited(
+                    f"{VENUE_ID}: local rate limit held for {key}",
+                    retry_after_s=exc.retry_after_s,
+                ) from exc
         client = await self._http()
         try:
             response = await client.get(path, params=params)
@@ -153,23 +181,29 @@ class IndodaxPublicVenue:
             ) from exc
 
         if response.status_code == 429:
-            retry_after = response.headers.get("retry-after")
             raise VenueRateLimited(
                 f"{VENUE_ID}: rate limited on {path}",
-                retry_after_s=_retry_after_s(retry_after),
+                retry_after_s=_retry_after_s(response.headers.get("retry-after")),
             )
         if response.status_code == 404:
             raise VenueNotFound(f"{VENUE_ID}: {path} not found")
         if response.status_code >= 500:
-            raise VenueUnavailable(f"{VENUE_ID}: {path} returned {response.status_code}")
+            # 503 often carries Retry-After; losing it would turn a polite back-off into a
+            # hot retry loop against a venue that just asked us to slow down.
+            raise VenueUnavailable(
+                f"{VENUE_ID}: {path} returned {response.status_code}; "
+                f"retry after {_retry_after_s(response.headers.get('retry-after'))}s"
+            )
         if response.status_code >= 400:
             raise VenueRejected(
                 code=str(response.status_code), message=f"{VENUE_ID}: {path} refused the request"
             )
+        if not response.content:
+            raise VenueUnavailable(f"{VENUE_ID}: {path} returned an empty body")
         try:
             return response.json()
         except (json.JSONDecodeError, ValueError) as exc:
-            raise VenueSchemaError(f"{VENUE_ID}: {path} returned non-JSON body") from exc
+            raise VenueUnavailable(f"{VENUE_ID}: {path} returned non-JSON body") from exc
 
     async def pairs(self) -> list[PairInfo]:
         if self._pairs_cache is None:
@@ -209,12 +243,12 @@ class IndodaxPublicVenue:
             enabled=True,
         )
 
-    async def tickers(self, pairs: Sequence[str] | None = None) -> dict[str, Ticker]:
+    async def tickers(self, pairs: Sequence[str] | None = None) -> list[Ticker]:
         raw = await self._get_json("/api/ticker_all", key="ticker_all")
         if not isinstance(raw, dict) or not isinstance(raw.get("tickers"), dict):
             raise VenueSchemaError(f"{VENUE_ID}: /api/ticker_all missing 'tickers'")
         wanted = {pair.lower() for pair in pairs} if pairs else None
-        out: dict[str, Ticker] = {}
+        out: list[Ticker] = []
         for pair, body in raw["tickers"].items():
             if wanted is not None and pair.lower() not in wanted:
                 continue
@@ -224,21 +258,29 @@ class IndodaxPublicVenue:
             bid = _dec(body.get("buy", last), f"{pair}.buy")
             ask = _dec(body.get("sell", last), f"{pair}.sell")
             now_ms = int(datetime.now(UTC).timestamp() * 1000)
-            out[pair.lower()] = Ticker(
-                pair=pair.lower(),
-                bid=bid,
-                ask=ask,
-                # The public ticker carries top-of-book prices only; sizes come from the
-                # depth call, so a zero here must not be read as an empty side.
-                bid_size=Decimal("0"),
-                ask_size=Decimal("0"),
-                last=last,
-                venue_ts=now_ms,
-                ingested_at=now_ms,
-            )
+            try:
+                out.append(
+                    Ticker(
+                        pair=pair.lower(),
+                        bid=bid,
+                        ask=ask,
+                        # The public ticker carries top-of-book prices only; sizes come from the
+                        # depth call, so a zero here must not be read as an empty side.
+                        bid_size=Decimal("0"),
+                        ask_size=Decimal("0"),
+                        last=last,
+                        venue_ts=now_ms,
+                        ingested_at=now_ms,
+                    )
+                )
+            except ValueError as exc:
+                raise VenueSchemaError(f"{VENUE_ID}: ticker {pair} failed validation") from exc
+        if not out:
+            # An empty tick list looks like a quiet market and is almost always an outage.
+            raise VenueUnavailable(f"{VENUE_ID}: /api/ticker_all returned no rows")
         return out
 
-    async def order_book(self, pair: str, *, depth: int = 50) -> OrderBook:
+    async def order_book(self, pair: str, depth: int = 20) -> OrderBook:
         raw = await self._get_json(f"/api/depth/{pair.lower()}", key=f"depth:{pair}")
         if not isinstance(raw, dict):
             raise VenueSchemaError(f"{VENUE_ID}: depth for {pair} is not an object")
@@ -249,6 +291,8 @@ class IndodaxPublicVenue:
         bids, asks = raw.get("buy"), raw.get("sell")
         if not isinstance(bids, list) or not isinstance(asks, list):
             raise VenueSchemaError(f"{VENUE_ID}: depth for {pair} missing bids or asks")
+        if not bids or not asks:
+            raise VenueSchemaError(f"{VENUE_ID}: depth for {pair} has an empty side")
         book = OrderBook(
             pair=pair.lower(),
             bids=[
@@ -259,6 +303,10 @@ class IndodaxPublicVenue:
             ],
             venue_ts=int(datetime.now(UTC).timestamp() * 1000),
         )
+        if book.bids != sorted(book.bids, key=lambda level: -level[0]):
+            raise VenueSchemaError(f"{VENUE_ID}: depth for {pair} bids are out of order")
+        if book.asks != sorted(book.asks, key=lambda level: level[0]):
+            raise VenueSchemaError(f"{VENUE_ID}: depth for {pair} asks are out of order")
         try:
             return book.validate_book()
         except ValueError as exc:
@@ -270,17 +318,26 @@ class IndodaxPublicVenue:
         raw = await self._get_json(f"/api/trades/{pair.lower()}", key=f"trades:{pair}")
         if not isinstance(raw, list):
             raise VenueSchemaError(f"{VENUE_ID}: trades for {pair} is not a list")
-        trades = [
-            PublicTrade(
-                trade_id=str(entry["tid"]),
-                pair=pair.lower(),
-                price=_dec(entry["price"], "trade.price"),
-                quantity=_dec(entry["amount"], "trade.amount"),
-                side="BUY" if entry.get("type") == "buy" else "SELL",
-                venue_ts=_ts_ms(entry["date"], "trade.date"),
-            )
-            for entry in raw[:limit]
-        ]
+        trades = []
+        for entry in raw[:limit]:
+            if not isinstance(entry, dict):
+                raise VenueSchemaError(f"{VENUE_ID}: trade row for {pair} is not an object")
+            side = SIDES.get(str(entry.get("type", "")).lower())
+            if side is None:
+                raise VenueSchemaError(f"{VENUE_ID}: trade side {entry.get('type')!r} unknown")
+            try:
+                trades.append(
+                    PublicTrade(
+                        trade_id=str(entry["tid"]),
+                        pair=pair.lower(),
+                        price=_dec(entry["price"], "trade.price"),
+                        quantity=_dec(entry["amount"], "trade.amount"),
+                        side=side,
+                        venue_ts=_ts_ms(entry["date"], "trade.date"),
+                    )
+                )
+            except KeyError as exc:
+                raise VenueSchemaError(f"{VENUE_ID}: trade row missing {exc.args[0]}") from exc
         return trades
 
     async def bars(self, pair: str, timeframe: str, start_ms: int, end_ms: int) -> list[Bar]:
@@ -371,7 +428,8 @@ class IndodaxPublicVenue:
         delay = 1.0
         while True:
             try:
-                tickers = await self.tickers(pairs)
+                rows = await self.tickers(pairs)
+                tickers = {ticker.pair: ticker for ticker in rows}
             except (VenueUnavailable, VenueRateLimited) as exc:
                 wait = (exc.retry_after_s or delay) if isinstance(exc, VenueRateLimited) else delay
                 await asyncio.sleep(wait)
@@ -395,10 +453,10 @@ class IndodaxPublicVenue:
             "public adapter cannot trade; order entry arrives with the private API"
         )
 
-    async def cancel_order(self, venue_order_id: str, pair: str) -> None:
+    async def cancel_order(self, pair: str, venue_order_id: str) -> None:
         raise VenueAuthError("public adapter cannot cancel orders")
 
-    async def get_order(self, venue_order_id: str, pair: str) -> VenueOrder:
+    async def get_order(self, pair: str, venue_order_id: str) -> VenueOrder:
         raise VenueAuthError("public adapter cannot read private orders")
 
     async def open_orders(self, pair: str | None = None) -> list[VenueOrder]:
