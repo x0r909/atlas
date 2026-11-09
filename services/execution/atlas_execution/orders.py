@@ -41,6 +41,7 @@ def client_order_id(cycle_id: UUID, proposal_id: UUID, attempt: int) -> str:
 
 class Session(Protocol):
     async def fetchrow(self, query: str, *args: Any) -> Mapping[str, Any] | None: ...
+    async def fetchval(self, query: str, *args: Any) -> Any: ...
     async def execute(self, query: str, *args: Any) -> str: ...
 
 
@@ -85,6 +86,14 @@ SELECT id, client_order_id, venue_order_id, venue_id, pair, side, type, quantity
  WHERE id = $1
 """
 
+_INSERT_PROTECTIVE = """
+INSERT INTO "order" (
+    venue_id, position_id, client_order_id, pair, side, type, quantity, limit_price,
+    is_protective, status, submitted_at
+) VALUES ($1, $2, $3, $4, 'SELL', 'LIMIT', $5, $6, true, 'PENDING_NEW', now())
+RETURNING id
+"""
+
 _UPDATE_POSITION_LINK = """
 UPDATE "order"
    SET position_id = $2,
@@ -103,9 +112,12 @@ class OrderWriter:
         venue: VenuePort,
         audit: AuditAppender,
         clock: Clock,
+        venue_id: str | None = None,
     ) -> None:
         self._session = session
         self._venue = venue
+        # Resolved lazily: the fill path must not read the venue profile over the port.
+        self._venue_id = venue_id
         self._audit = audit
         self._clock = clock
 
@@ -171,6 +183,66 @@ class OrderWriter:
         await session.execute(_UPDATE_STATUS, order_id, "CANCELED", None, remainder_action)
         await self._record(order_id, "CANCELED", correlation_id, reason=reason)
         return Cancelled(order_id, "CANCELED", unfilled_since=str(since) if since else None)
+
+    async def place_protective(
+        self,
+        *,
+        position_id: UUID,
+        pair: str,
+        quantity: Any,
+        limit_price: Any,
+        client_order_id: str,
+        correlation_id: str,
+    ) -> Placed:
+        """Place a reduce-only stop for an existing position. No verdict is involved.
+
+        The order row exists before the venue is asked, so a timeout leaves a row to reconcile
+        against instead of an exposure nobody can see. A venue rejection cancels that row: a
+        REJECTED stop order is indistinguishable from no stop, and the monitor needs the
+        difference to be visible in ``position.stop_order_id`` rather than inferred.
+        """
+        session = self._session
+        venue_id = self._venue_id or self._venue.profile().venue_id
+        order_id = await session.fetchval(
+            _INSERT_PROTECTIVE,
+            venue_id,
+            position_id,
+            client_order_id,
+            pair,
+            quantity,
+            limit_price,
+        )
+        request = PlaceOrderRequest(
+            pair=pair,
+            side="SELL",
+            type="LIMIT",
+            quantity=quantity,
+            limit_price=limit_price,
+            client_order_id=client_order_id,
+            signed_order_id=None,
+        )
+        try:
+            ack: VenueOrderAck = await self._venue.place_order(request)
+        except VenueRejected as rejected:
+            await session.execute(_UPDATE_STATUS, order_id, "REJECTED", None, None)
+            await self._record(
+                order_id,
+                "REJECTED",
+                correlation_id,
+                reason=rejected.code,
+                message=rejected.message,
+                protective=True,
+            )
+            return Placed(order_id, client_order_id, "REJECTED", None)
+        await session.execute(_UPDATE_STATUS, order_id, "OPEN", ack.venue_order_id, None)
+        await self._record(
+            order_id,
+            "OPEN",
+            correlation_id,
+            venue_order_id=ack.venue_order_id,
+            protective=True,
+        )
+        return Placed(order_id, client_order_id, "OPEN", ack.venue_order_id)
 
     async def attach_position(
         self, order_id: UUID, position_id: UUID, *, correlation_id: str

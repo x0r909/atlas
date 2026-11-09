@@ -177,7 +177,8 @@ class PlaceOrderRequest(_Model):
     quantity: Decimal = Field(gt=0)
     limit_price: Decimal | None = None
     client_order_id: str = Field(min_length=1)
-    signed_order_id: str
+    # Absent for a protective stop: that order is not the output of a verdict.
+    signed_order_id: str | None = None
 
     @field_validator("limit_price")
     @classmethod
