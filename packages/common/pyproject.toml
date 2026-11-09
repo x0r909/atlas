@@ -23,5 +23,5 @@ include = ["atlas_common*"]
 atlas_common = ["py.typed"]
 
 [tool.mypy]
-python_executable = "../../.venv/bin/python"
+python_executable = "${MYPY_CONFIG_FILE_DIR}/../../.venv/bin/python"
 mypy_path = ["../../packages/common", "../../packages/schemas"]

@@ -60,7 +60,7 @@ def test_assert_port_surface_rejects_a_withdraw_method():
         def withdraw(self) -> None: ...
 
     with pytest.raises(AssertionError, match="forbidden"):
-        assert_port_surface(Sneaky)  # type: ignore[arg-type]
+        assert_port_surface(Sneaky)
 
 
 def test_every_adapter_error_is_one_of_the_mapped_types():

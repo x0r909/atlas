@@ -164,7 +164,7 @@ async def test_the_failure_counter_decides_not_a_stale_read(auth, clock, store):
     async def stale(key: str) -> int:
         return 0
 
-    store.counter = stale  # type: ignore[method-assign]
+    store.counter = stale
     for _ in range(LOCKOUT_FAILURES):
         with pytest.raises(AuthError) as excinfo:
             await auth.login("augie", "wrong password here", "000000")

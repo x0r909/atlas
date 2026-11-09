@@ -1,0 +1,20 @@
+# Not a buildable project: this file gives everything under tests/ one mypy config. Paths are
+# anchored with ${MYPY_CONFIG_FILE_DIR} (or relative to this file) so the answer does not depend
+# on which test directory the checker happens to be invoked from.
+[tool.mypy]
+python_executable = "${MYPY_CONFIG_FILE_DIR}/../.venv/bin/python"
+mypy_path = [
+  "../packages/common",
+  "../packages/schemas",
+  "../services/api-gateway",
+  "../services/execution",
+  "../services/ingest-market",
+  "../services/ingest-news",
+  "../services/feature-engine",
+]
+explicit_package_bases = true
+namespace_packages = true
+
+[[tool.mypy.overrides]]
+module = ["feedparser", "asyncpg", "structlog", "structlog.*"]
+ignore_missing_imports = true

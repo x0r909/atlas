@@ -1,4 +1,7 @@
-"""Staleness is a number, not a feeling: the breaker thresholds are pinned here."""
+"""Staleness is a number, not a feeling: the breaker thresholds are pinned here.
+
+Each threshold is pinned at its boundary: the exact value passes, one unit past fails.
+"""
 
 from __future__ import annotations
 

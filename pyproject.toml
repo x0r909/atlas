@@ -60,7 +60,7 @@ ignore = [
 python_version = "3.12"
 # Resolve imports against the project venv, not whatever interpreter PATH mypy happens
 # to be installed under. Without this, a global mypy reports pydantic as missing.
-python_executable = ".venv/bin/python"
+python_executable = "${MYPY_CONFIG_FILE_DIR}/.venv/bin/python"
 warn_unused_configs = true
 warn_redundant_casts = true
 warn_unused_ignores = true
@@ -84,6 +84,8 @@ mypy_path = [
  "services/api-gateway",
  "services/execution",
  "services/ingest-market",
+ "services/ingest-news",
+ "services/feature-engine",
 ]
 
 [[tool.mypy.overrides]]
@@ -101,6 +103,11 @@ disallow_untyped_calls = false
 [[tool.mypy.overrides]]
 # asyncpg ships no py.typed marker; it is only used by the integration tests.
 module = ["asyncpg"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# feedparser ships no py.typed marker; the parse boundary is validated by our own schema.
+module = ["feedparser"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

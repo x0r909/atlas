@@ -2,5 +2,5 @@
 # repo venv and the workspace packages. Tool paths are relative to this directory,
 # which is where pi-lens resolves mypy's cwd.
 [tool.mypy]
-python_executable = "../../.venv/bin/python"
+python_executable = "${MYPY_CONFIG_FILE_DIR}/../../.venv/bin/python"
 mypy_path = ["../../packages/common"]

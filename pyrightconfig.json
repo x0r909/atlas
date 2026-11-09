@@ -19,7 +19,9 @@
     "packages/schemas",
     "services/execution",
     "services/api-gateway",
-    "services/ingest-market"
+    "services/ingest-market",
+    "services/ingest-news",
+    "services/feature-engine"
   ],
   "reportMissingImports": "error",
   "reportMissingTypeStubs": "none",
