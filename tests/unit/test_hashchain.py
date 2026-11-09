@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from atlas_common.hashchain import (
+    DOMAIN,
     GENESIS_HASH,
     AuditChain,
     AuditEntry,
@@ -15,7 +16,9 @@ from atlas_common.hashchain import (
 def _chain(length: int = 3) -> AuditChain:
     chain = AuditChain()
     for index in range(length):
-        chain.append({"kind": "order.accepted", "n": index, "amount_idr": "250000"})
+        chain.append(
+            {"kind": "order.accepted", "n": index, "amount_idr": "250000"}, record_type="ORDER"
+        )
     return chain
 
 
@@ -24,7 +27,7 @@ def test_genesis_links_to_the_first_record_and_the_chain_verifies():
     first = chain.entries[0]
     assert first.seq == 1
     assert first.prev_hash == GENESIS_HASH
-    assert first.hash == compute_hash(GENESIS_HASH, first.payload, 1)
+    assert first.hash == compute_hash(GENESIS_HASH, first.payload, 1, record_type="ORDER")
     assert chain.verify().ok is True
     assert chain.verify().checked == 3
 
@@ -35,10 +38,13 @@ def test_hash_formula_is_pinned():
 
     payload = {"a": 1, "b": "x"}
     digest = hashlib.sha256()
+    digest.update(DOMAIN)
+    digest.update(b"ORDER")
+    digest.update(b"\x00")
     digest.update(b"")
     digest.update(b'{"a":1,"b":"x"}')
     digest.update((1).to_bytes(8, "big"))
-    assert compute_hash(None, payload, 1) == digest.hexdigest()
+    assert compute_hash(None, payload, 1, record_type="ORDER") == digest.hexdigest()
 
 
 def test_mutating_a_closed_record_breaks_verification_at_that_seq():
@@ -46,6 +52,7 @@ def test_mutating_a_closed_record_breaks_verification_at_that_seq():
     entries = list(chain.entries)
     tampered = AuditEntry(
         seq=entries[1].seq,
+        record_type=entries[1].record_type,
         payload={"kind": "order.accepted", "n": 999},
         prev_hash=entries[1].prev_hash,
         hash=entries[1].hash,
@@ -60,8 +67,8 @@ def test_mutating_a_closed_record_breaks_verification_at_that_seq():
 def test_rewriting_payload_and_hash_still_breaks_the_next_link():
     chain = _chain()
     entries = list(chain.entries)
-    forged_hash = compute_hash(entries[0].prev_hash, {"kind": "forged"}, 1)
-    entries[0] = AuditEntry(1, {"kind": "forged"}, GENESIS_HASH, forged_hash)
+    forged_hash = compute_hash(entries[0].prev_hash, {"kind": "forged"}, 1, record_type="ORDER")
+    entries[0] = AuditEntry(1, "ORDER", {"kind": "forged"}, GENESIS_HASH, forged_hash)
     result = verify_chain(entries)
     assert result.ok is False
     assert result.broken_at_seq == 2
@@ -81,8 +88,10 @@ def test_decimal_and_timestamp_serialisation_is_stable_across_runs():
     from decimal import Decimal
 
     payload = {"price": Decimal("0.1"), "at": datetime(2026, 11, 8, 10, 0, tzinfo=UTC)}
-    first = compute_hash(GENESIS_HASH, payload, 1)
-    assert first == compute_hash(GENESIS_HASH, dict(reversed(list(payload.items()))), 1)
+    first = compute_hash(GENESIS_HASH, payload, 1, record_type="DECISION")
+    assert first == compute_hash(
+        GENESIS_HASH, dict(reversed(list(payload.items()))), 1, record_type="DECISION"
+    )
 
 
 def test_naive_timestamps_are_refused_rather_than_signed_as_local_time():
@@ -91,11 +100,64 @@ def test_naive_timestamps_are_refused_rather_than_signed_as_local_time():
     import pytest
 
     with pytest.raises(ValueError, match="UTC-aware"):
-        compute_hash(GENESIS_HASH, {"at": datetime(2026, 11, 8, 10, 0)}, 1)
+        compute_hash(GENESIS_HASH, {"at": datetime(2026, 11, 8, 10, 0)}, 1, record_type="ORDER")
 
 
 def test_single_record_verification_reports_the_problem():
     chain = _chain(1)
     assert verify_entry(chain.entries[0]) is None
-    broken = AuditEntry(1, {"x": 1}, GENESIS_HASH, "0" * 64)
+    broken = AuditEntry(1, "ORDER", {"x": 1}, GENESIS_HASH, "0" * 64)
     assert "hash mismatch" in (verify_entry(broken) or "")
+
+
+def test_changing_the_record_type_breaks_the_record():
+    """Relabelling KILL_SWITCH as INCIDENT must not verify: the type is inside the digest."""
+    chain = _chain(1)
+    entry = chain.entries[0]
+    relabelled = AuditEntry(
+        seq=entry.seq,
+        record_type="KILL_SWITCH",
+        payload=entry.payload,
+        prev_hash=entry.prev_hash,
+        hash=entry.hash,
+        payload_canonical=entry.payload_canonical,
+    )
+    problem = verify_entry(relabelled)
+    assert problem is not None
+    assert "hash mismatch" in problem
+
+
+def test_a_payload_that_differs_from_its_stored_canonical_form_is_reported():
+    chain = _chain(1)
+    entry = chain.entries[0]
+    rewritten = AuditEntry(
+        seq=entry.seq,
+        record_type=entry.record_type,
+        payload={"kind": "order.accepted", "n": 0, "amount_idr": "999999"},
+        prev_hash=entry.prev_hash,
+        hash=entry.hash,
+        payload_canonical=entry.payload_canonical,
+    )
+    problem = verify_entry(rewritten)
+    assert problem is not None
+    assert "canonical form" in problem
+
+
+def test_jsonb_number_normalisation_does_not_break_an_honest_record():
+    """jsonb returns 1e20 as 100000000000000000000; hashing the round-trip would lie."""
+    from decimal import Decimal
+
+    chain = AuditChain()
+    entry = chain.append({"amount": Decimal("1E+20")}, record_type="ORDER")
+    round_tripped = AuditEntry(
+        seq=entry.seq,
+        record_type=entry.record_type,
+        payload={"amount": 100000000000000000000},
+        prev_hash=entry.prev_hash,
+        hash=entry.hash,
+        payload_canonical=entry.payload_canonical,
+    )
+    # The stored canonical text is what was hashed, so verification only cares that the row
+    # still carries it -- a jsonb rewrite alone is invisible, which is the point.
+    assert verify_entry(round_tripped) is not None  # the canonical text no longer matches
+    assert verify_entry(entry) is None

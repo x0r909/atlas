@@ -64,8 +64,21 @@ def _validate(record_type: str, payload: dict[str, Any]) -> None:
         raise ValueError(f"unknown audit record_type {record_type!r}")
     if not isinstance(payload, dict):
         raise TypeError("audit payload must be a mapping")
-    if "seq" in payload or "hash" in payload:
+    if "seq" in payload or "hash" in payload or "prev_hash" in payload:
         raise ValueError("audit payload may not carry chain fields")
+    _reject_floats(payload)
+
+
+def _reject_floats(value: Any, path: str = "payload") -> None:
+    """jsonb does not preserve a float; see atlas_common.audit_chain for the reasoning."""
+    if isinstance(value, float):
+        raise TypeError(f"{path} may not contain a float; use Decimal or str")
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            _reject_floats(item, f"{path}.{key}")
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            _reject_floats(item, f"{path}[{index}]")
 
 
 async def append(
@@ -87,17 +100,20 @@ async def append(
 
     last_seq = int(row[0]) if row is not None else 0
     last_hash = str(row[1]) if row is not None else GENESIS_HASH
-    entry = _next_entry(last_seq, last_hash, payload)
+    entry = _next_entry(last_seq, last_hash, payload, record_type=str(record_type))
 
     await conn.execute(  # nosemgrep
         text(
-            "INSERT INTO audit_record (seq, record_type, payload, prev_hash, hash) "
-            "VALUES (:seq, :record_type, CAST(:payload AS jsonb), :prev_hash, :hash)"
+            "INSERT INTO audit_record "
+            "(seq, record_type, payload, payload_canonical, prev_hash, hash) "
+            "VALUES (:seq, :record_type, CAST(:payload AS jsonb), :payload_canonical, "
+            ":prev_hash, :hash)"
         ),
         {
             "seq": entry.seq,
             "record_type": record_type,
             "payload": _json(entry.payload),
+            "payload_canonical": entry.payload_canonical,
             "prev_hash": entry.prev_hash,
             "hash": entry.hash,
         },
@@ -112,15 +128,20 @@ def _json(payload: Mapping[str, Any]) -> str:
 async def load_chain(conn: AsyncConnection) -> list[AuditEntry]:
     rows = (
         await conn.execute(  # nosemgrep
-            text("SELECT seq, payload, prev_hash, hash FROM audit_record ORDER BY seq")
+            text(
+                "SELECT seq, record_type, payload, prev_hash, hash, payload_canonical "
+                "FROM audit_record ORDER BY seq"
+            )
         )
     ).all()
     return [
         AuditEntry(
             seq=int(row[0]),
-            payload=dict(row[1]),
-            prev_hash=str(row[2]),
-            hash=str(row[3]),
+            record_type=str(row[1]),
+            payload=dict(row[2]),
+            prev_hash=str(row[3]),
+            hash=str(row[4]),
+            payload_canonical=None if row[5] is None else str(row[5]),
         )
         for row in rows
     ]
