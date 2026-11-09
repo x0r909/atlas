@@ -11,10 +11,10 @@ from __future__ import annotations
 import asyncio
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Protocol
+from typing import Protocol
 
 from atlas_schemas.events import EventEnvelope
 from atlas_schemas.venue import Bar, MarketEvent, VenueError
@@ -149,6 +149,9 @@ class MarketIngestor:
         self.pairs = tuple(pairs)
         self.timeframe = timeframe
         self._bar_ms = bar_seconds * 1000
+        # Expected cadence of a bar is the timeout, not the staleness threshold: reporting the
+        # threshold here made a pair look freshly healthy for twice its real interval.
+        self._expected_interval_s = bar_seconds
         self._stale_after_s = stale_after_s
         self._metrics = metrics or NullMetrics()
         self._now_ms = now_ms or (lambda: int(time.time() * 1000))
@@ -166,7 +169,7 @@ class MarketIngestor:
                 await self._health.report(
                     f"{self.venue_id}:{pair}:{self.timeframe}",
                     ok=False,
-                    expected_interval_s=self._stale_after_s,
+                    expected_interval_s=self._expected_interval_s,
                     at_ms=end_ms,
                 )
                 continue
@@ -178,12 +181,22 @@ class MarketIngestor:
                 await self._health.report(
                     f"{self.venue_id}:{pair}:{self.timeframe}",
                     ok=True,
-                    expected_interval_s=self._stale_after_s,
+                    expected_interval_s=self._expected_interval_s,
                     at_ms=end_ms,
                 )
                 continue
 
-            fresh = await self._bars.upsert_bars(rows)
+            try:
+                fresh = await self._bars.upsert_bars(rows)
+            except Exception:
+                # A write failure is systemic, but the pair must not keep claiming health.
+                await self._health.report(
+                    f"{self.venue_id}:{pair}:{self.timeframe}",
+                    ok=False,
+                    expected_interval_s=self._expected_interval_s,
+                    at_ms=end_ms,
+                )
+                raise
             self._metrics.bars_written(len(fresh))
             self._metrics.bars_duplicate(len(rows) - len(fresh))
             for row in fresh:
@@ -192,16 +205,16 @@ class MarketIngestor:
             await self._health.report(
                 f"{self.venue_id}:{pair}:{self.timeframe}",
                 ok=True,
-                expected_interval_s=self._stale_after_s,
+                expected_interval_s=self._expected_interval_s,
                 at_ms=end_ms,
             )
         return written
 
-    async def stream_ticks(self, events: Any) -> int:
+    async def stream_ticks(self, events: AsyncIterator[MarketEvent]) -> int:
         """Store quotes and publish ticks until the source stream ends."""
         published = 0
         async for event in events:
-            if not isinstance(event, MarketEvent) or event.ticker is None:
+            if event.ticker is None:
                 continue
             ticker = event.ticker
             await self._quotes.upsert_quote(

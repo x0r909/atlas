@@ -35,8 +35,11 @@ def bar(pair: str, offset: int, close: str = "1035200000") -> Bar:
 class FakeBars:
     def __init__(self) -> None:
         self.rows: dict[tuple[str, str, str, int], BarRow] = {}
+        self.fail = False
 
     async def upsert_bars(self, rows: Sequence[BarRow]) -> list[BarRow]:
+        if self.fail:
+            raise RuntimeError("write failed")
         fresh: list[BarRow] = []
         for row in rows:
             key = (row.venue_id, row.pair, row.timeframe, row.ts)
@@ -160,13 +163,13 @@ async def test_a_venue_failure_marks_the_source_unhealthy_and_keeps_the_loop_ali
     assert bars.rows == {}
     assert bus.published == []
     assert health.reports[0][1] is False
-    assert health.reports[0][2] == 120
+    assert health.reports[0][2] == 60  # expected cadence, not the staleness threshold
 
 
 async def test_health_is_reported_even_when_nothing_new_arrives():
     ingestor, _, _, health, _ = build(FakeSource({"btc_idr": []}))
     await ingestor.run_once()
-    assert health.reports == [("indodax:btc_idr:1m", True, 120)]
+    assert health.reports == [("indodax:btc_idr:1m", True, 60)]
 
 
 async def test_ticks_are_stored_then_published_with_the_quote():
@@ -220,3 +223,12 @@ async def test_every_configured_pair_is_ingested(pairs):
     ingestor, bars, _, _, _ = build(FakeSource(source), pairs=pairs)
     await ingestor.run_once()
     assert {row.pair for row in bars.rows.values()} == set(pairs)
+
+
+async def test_a_write_failure_marks_the_pair_unhealthy_and_is_not_swallowed():
+    """A database failure must be visible: the pair cannot keep claiming health."""
+    ingestor, bars, _, health, _ = build(FakeSource({"btc_idr": [bar("btc_idr", 1)]}))
+    bars.fail = True
+    with pytest.raises(RuntimeError, match="write"):
+        await ingestor.run_once()
+    assert health.reports[0][1] is False
