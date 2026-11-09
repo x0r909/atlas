@@ -7,10 +7,61 @@ leaking a driver object into a response.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import datetime as dt
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol
+
+from atlas_common.audit_chain import append as append_audit
+
+# The columns an operator may change, and the type each one carries. A name that is not
+# here is not a risk knob: allowing an unknown key would let a typo become a new policy.
+RISK_CONFIG_NUMERIC: tuple[str, ...] = (
+    "risk_per_trade_pct",
+    "max_position_pct",
+    "max_asset_exposure_pct",
+    "max_total_exposure_pct",
+    "max_daily_loss_pct",
+    "max_drawdown_pct",
+    "min_rr_net",
+    "max_slippage_pct",
+    "max_spread_multiple",
+    "volatility_breaker_sigma",
+)
+RISK_CONFIG_COUNT: tuple[str, ...] = (
+    "stale_price_seconds",
+    "cooldown_after_losses",
+    "cooldown_hours",
+    "time_stop_hours",
+    "max_open_positions",
+    "max_orders_per_hour",
+    "llm_daily_cap_idr",
+    "llm_monthly_cap_idr",
+)
+RISK_CONFIG_COLUMNS: tuple[str, ...] = RISK_CONFIG_NUMERIC + RISK_CONFIG_COUNT
+
+
+def _json_scalar(value: Decimal | int) -> str | int:
+    """Decimals travel as strings (json has no decimal); counts stay numbers."""
+    return int(value) if isinstance(value, int) else str(value)
+
+
+def _config_value(key: str, raw: Any) -> Decimal | int:
+    """Coerce one operator value, refusing what the column cannot hold."""
+    if isinstance(raw, bool):
+        raise ValueError(f"{key} must be a number, not a boolean")
+    try:
+        value = raw if isinstance(raw, Decimal) else Decimal(str(raw))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(f"{key} must be a number") from exc
+    if not value.is_finite():
+        raise ValueError(f"{key} must be finite")
+    if key in RISK_CONFIG_COUNT:
+        if value != value.to_integral_value():
+            raise ValueError(f"{key} must be a whole number")
+        return int(value)
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +112,10 @@ class Repo(Protocol):
         actor_ref: str | None,
         evidence_ref: str | None,
         capital_cap_idr: Decimal | None,
+    ) -> dict[str, Any]: ...
+
+    async def apply_risk_config_changes(
+        self, changes: Mapping[str, Any], *, operator: str
     ) -> dict[str, Any]: ...
 
     async def positions(self, status: str | None) -> list[PositionView]: ...
@@ -191,6 +246,65 @@ class AsyncpgRepo:
             "capital_cap_idr": str(row["capital_cap_idr"]) if row["capital_cap_idr"] else None,
             "since_ms": _ms(row["created_at"]),
         }
+
+    async def apply_risk_config_changes(
+        self, changes: Mapping[str, Any], *, operator: str
+    ) -> dict[str, Any]:
+        """Write a new config version and one audit record per changed key.
+
+        The version bump, the new row and every audit record share one transaction: a
+        change that cannot be recorded does not happen, and a recorded change always
+        happened.
+        """
+        unknown = set(changes) - set(RISK_CONFIG_COLUMNS)
+        if unknown:
+            raise ValueError(f"unknown risk config key(s): {sorted(unknown)}")
+        wanted = {key: _config_value(key, raw) for key, raw in changes.items()}
+
+        async with self._pool.acquire() as conn, conn.transaction():
+            head = await conn.fetchrow("SELECT * FROM risk_config ORDER BY version DESC LIMIT 1")
+            if head is None:
+                raise RuntimeError("risk_config is empty - migration 0001 seeds it")
+            values = {column: head[column] for column in RISK_CONFIG_COLUMNS}
+            delta = {key: (values[key], new) for key, new in wanted.items() if values[key] != new}
+            if not delta:
+                return {"version": int(head["version"]), "changed": []}
+
+            version = int(head["version"]) + 1
+            values.update({key: new for key, (_, new) in delta.items()})
+            params: list[Any] = [version]
+            params.extend(values[column] for column in RISK_CONFIG_COLUMNS)
+            await conn.execute(
+                """
+                INSERT INTO risk_config (
+                    version, risk_per_trade_pct, max_position_pct, max_asset_exposure_pct,
+                    max_total_exposure_pct, max_daily_loss_pct, max_drawdown_pct, min_rr_net,
+                    max_slippage_pct, max_spread_multiple, volatility_breaker_sigma,
+                    stale_price_seconds, cooldown_after_losses, cooldown_hours,
+                    time_stop_hours, max_open_positions, max_orders_per_hour,
+                    llm_daily_cap_idr, llm_monthly_cap_idr
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                    $11, $12, $13, $14, $15, $16, $17, $18, $19
+                )
+                """,
+                *params,
+            )
+            at = dt.datetime.now(dt.UTC).isoformat()
+            for key, (old, new) in delta.items():
+                await append_audit(
+                    conn,
+                    "CONFIG_CHANGE",
+                    {
+                        "key": key,
+                        "old": _json_scalar(old),
+                        "new": _json_scalar(new),
+                        "operator": operator,
+                        "at": at,
+                        "version": version,
+                    },
+                )
+        return {"version": version, "changed": sorted(delta)}
 
     async def positions(self, status: str | None) -> list[PositionView]:
         query = """

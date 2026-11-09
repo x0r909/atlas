@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+from collections.abc import Mapping
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
@@ -62,6 +65,7 @@ class Store:
 class FakeRepo:
     def __init__(self) -> None:
         self.mode = "PAPER"
+        self.config_changes: list[tuple[dict[str, Any], str]] = []
         self.appended: list[dict[str, Any]] = []
         self.audit_broken = False
         self.position_rows = [
@@ -227,6 +231,12 @@ class FakeRepo:
             ServiceHealth("ingest-market", "OK", NOW * 1000),
             ServiceHealth("stop-monitor", "OK", NOW * 1000),
         ]
+
+    async def apply_risk_config_changes(
+        self, changes: Mapping[str, Any], *, operator: str
+    ) -> dict[str, Any]:
+        self.config_changes.append((dict(changes), operator))
+        return {"version": 2, "changed": sorted(changes)}
 
 
 class Operator:
@@ -394,3 +404,40 @@ def test_audit_reports_a_broken_chain(harness: Any) -> None:
     assert client.get("/audit").json()["chain_ok"] is True
     repo.audit_broken = True
     assert client.get("/audit").json()["chain_ok"] is False
+
+
+def test_a_risk_config_change_needs_a_confirmation_token(harness: Any) -> None:
+    client, repo, operator, clock, _ = harness
+    cookie = login(client, operator, clock)
+    refused = client.put(
+        "/risk/config",
+        json={"max_open_positions": 4},
+        cookies={"__Host-atlas_session": cookie},
+    )
+    assert refused.status_code == 428
+    assert refused.json()["error"]["code"] == "CONFIRM_REQUIRED"
+    assert repo.config_changes == []
+
+
+def test_a_confirmed_risk_config_change_names_the_operator(harness: Any) -> None:
+    client, repo, operator, clock, _ = harness
+    cookie = login(client, operator, clock)
+    body = {"max_open_positions": 4}
+    params_hash = hashlib.sha256(
+        json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    token = issue_confirm_token(
+        CONFIRM_KEY,
+        session_id=cookie,
+        action="PUT /risk/config",
+        params_hash=params_hash,
+        now=int(clock.now),
+    )
+    accepted = client.put(
+        "/risk/config",
+        json=body,
+        headers={"X-Atlas-Confirm": token},
+        cookies={"__Host-atlas_session": cookie},
+    )
+    assert accepted.status_code == 200, accepted.text
+    assert repo.config_changes == [({"max_open_positions": 4}, operator.username)]

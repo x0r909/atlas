@@ -29,14 +29,17 @@ async def _empty(connection: AsyncConnection) -> None:
     """TRUNCATE is refused by audit_record_no_truncate; a test fixture may lift the trigger
     it is about to prove. Nothing else in the suite touches audit_record."""
     await connection.execute(text("ALTER TABLE audit_record DISABLE TRIGGER USER"))
-    await connection.execute(text("TRUNCATE audit_record"))
+    # RESTART IDENTITY: the chain is only gapless from 1 if the counter restarts too.
+    await connection.execute(text("TRUNCATE audit_record RESTART IDENTITY"))
     await connection.execute(text("ALTER TABLE audit_record ENABLE TRIGGER USER"))
 
 
 @pytest.fixture()
 async def engine() -> AsyncGenerator[AsyncEngine, None]:
     created = create_async_engine(to_async_dsn(DSN))
-    async with created.connect() as connection:
+    # begin(), not connect(): an implicit transaction is rolled back on close, which would
+    # make the clean-up below a no-op and let rows from another test survive into this one.
+    async with created.begin() as connection:
         exists = await connection.execute(text("SELECT to_regclass('public.audit_record')"))
         if exists.scalar() is None:
             await created.dispose()

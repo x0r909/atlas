@@ -22,6 +22,7 @@ from atlas_api.auth import (
 from atlas_api.repo import Repo, ServiceHealth, serialize_positions
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
+from sqlalchemy.exc import IntegrityError
 
 BARS_PAGE_LIMIT = 5000
 ALLOWED_TIMEFRAMES = frozenset({"1m", "5m", "15m", "1h", "4h", "1d"})
@@ -381,24 +382,16 @@ def create_app(*, auth: AuthService, repo: Repo) -> FastAPI:
 
     @app.put("/risk/config")
     async def put_risk_config(request: Request, session: Session = Depends(confirmed)) -> Any:
-        _ = session
+        repo_: Repo = request.app.state.repo
         body = await request.json()
-        unknown = set(body) - {
-            "max_position_pct",
-            "max_portfolio_risk_pct",
-            "max_concurrent_positions",
-            "max_daily_trades",
-            "min_rr_net",
-            "stop_monitor_grace_s",
-            "max_daily_loss_pct",
-            "max_drawdown_pct",
-            "slippage_buffer_pct",
-        }
-        if unknown:
-            raise HTTPException(status_code=422, detail=f"unknown config keys: {sorted(unknown)}")
-        for key, value in body.items():
-            _decimal(value, key)
-        return {"accepted": True, "requires_confirm": True, "keys": sorted(body)}
+        try:
+            return await repo_.apply_risk_config_changes(body, operator=session.username)
+        except ValueError as exc:  # unknown key, non-numeric value, unfinished integer
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except IntegrityError as exc:  # the column's own bounds, checked by Postgres
+            raise HTTPException(
+                status_code=422, detail=f"risk config change refused: {exc.__class__.__name__}"
+            ) from exc
 
     @app.post("/promotion/confirm")
     async def promotion_confirm(request: Request, session: Session = Depends(confirmed)) -> Any:

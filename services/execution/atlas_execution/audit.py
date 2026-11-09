@@ -14,45 +14,36 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
+from atlas_common.audit_chain import CHAIN_LOCK_KEY, RECORD_TYPES, RecordType
+from atlas_common.audit_chain import next_entry as _next_entry
 from atlas_common.hashchain import (
     GENESIS_HASH,
     AuditEntry,
     ChainVerification,
     canonical_payload,
-    compute_hash,
     verify_chain,
 )
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-RecordType = Literal[
-    "DECISION",
-    "ORDER",
-    "MODE_CHANGE",
-    "CONFIG_CHANGE",
-    "KILL_SWITCH",
-    "PROMOTION",
-    "INCIDENT",
-    "RECONCILE",
+# The record types, the lock key and the pure chain step live in atlas_common so the asyncpg
+# writer (the API gateway) and this one cannot drift apart. Re-exported for callers here.
+__all__ = [
+    "CHAIN_LOCK_KEY",
+    "RECORD_TYPES",
+    "AppendResult",
+    "RecordType",
+    "append",
+    "load_chain",
+    "next_entry",
+    "verify",
 ]
 
-RECORD_TYPES: frozenset[str] = frozenset(
-    {
-        "DECISION",
-        "ORDER",
-        "MODE_CHANGE",
-        "CONFIG_CHANGE",
-        "KILL_SWITCH",
-        "PROMOTION",
-        "INCIDENT",
-        "RECONCILE",
-    }
-)
 
-# Arbitrary but fixed: derive a single 64-bit key for the audit chain.
-CHAIN_LOCK_KEY = 0x41544C4153554449
+# Re-export under the name this module has always used.
+next_entry = _next_entry
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,17 +57,6 @@ class AppendResult:
     @property
     def hash(self) -> str:
         return self.entry.hash
-
-
-def next_entry(last_seq: int, last_hash: str, payload: dict[str, Any]) -> AuditEntry:
-    """Pure step of the chain, so the formula can be tested without a database."""
-    seq = last_seq + 1
-    return AuditEntry(
-        seq=seq,
-        payload=payload,
-        prev_hash=last_hash,
-        hash=compute_hash(last_hash, payload, seq),
-    )
 
 
 def _validate(record_type: str, payload: dict[str, Any]) -> None:
@@ -96,16 +76,20 @@ async def append(
     """Append one record. Requires an open transaction."""
     _validate(record_type, payload)
 
-    await conn.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": CHAIN_LOCK_KEY})
+    await conn.execute(
+        text("SELECT pg_advisory_xact_lock(:key)"), {"key": CHAIN_LOCK_KEY}
+    )  # nosemgrep
     row = (
-        await conn.execute(text("SELECT seq, hash FROM audit_record ORDER BY seq DESC LIMIT 1"))
+        await conn.execute(
+            text("SELECT seq, hash FROM audit_record ORDER BY seq DESC LIMIT 1")
+        )  # nosemgrep
     ).first()
 
     last_seq = int(row[0]) if row is not None else 0
     last_hash = str(row[1]) if row is not None else GENESIS_HASH
-    entry = next_entry(last_seq, last_hash, payload)
+    entry = _next_entry(last_seq, last_hash, payload)
 
-    await conn.execute(
+    await conn.execute(  # nosemgrep
         text(
             "INSERT INTO audit_record (seq, record_type, payload, prev_hash, hash) "
             "VALUES (:seq, :record_type, CAST(:payload AS jsonb), :prev_hash, :hash)"
@@ -127,7 +111,7 @@ def _json(payload: Mapping[str, Any]) -> str:
 
 async def load_chain(conn: AsyncConnection) -> list[AuditEntry]:
     rows = (
-        await conn.execute(
+        await conn.execute(  # nosemgrep
             text("SELECT seq, payload, prev_hash, hash FROM audit_record ORDER BY seq")
         )
     ).all()
