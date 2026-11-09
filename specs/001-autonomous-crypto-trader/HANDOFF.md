@@ -3,12 +3,36 @@
 Baca file ini dulu; jangan baca spec.md/plan.md/tasks.md utuh. Buka hanya baris task + FR yang dirujuk.
 
 ## Status
-- Terakhir selesai: T070/T071 (partial fill + sized stop, `1979ae7`: `fills.py`,
-  `position_sync.py`, `state_machine.py` fee columns, `tests/integration/test_partial_fill.py`),
-  T068/T069 (`state_machine.py`), T067 (`391bb88`), T066, T065b, plus `58326f2` (golden biaya).
-- Berikutnya: T071a/T071b sengaja ditunda sampai T075/T075a/T075b ada (mereka pemilik jalur close
-  reduce-only); jadi urutannya T072/T073 (UNKNOWN recovery), T074/T075 (close escalation), T075a/b,
-  T071a/b, T076/T077, T078, lalu Phase 8, 9, 5, 10.
+- Terakhir selesai: **T086/T087** (`52423bd`: `0009_protective_stop.py`,
+  `execute.py` `StopAcceptance`, `orders.py` `place_protective`, `tests/contract/test_protective_stop.py`
+  7 test), lalu T070/T071 (`1979ae7`: `fills.py`, `position_sync.py`, `state_machine.py` fee columns,
+  `tests/integration/test_partial_fill.py`), T068/T069 (`state_machine.py`), T067 (`391bb88`),
+  T066, T065b, plus `58326f2` (golden biaya).
+- Dependency check T071↔T087: **tidak ada dependency**. T071 hanya mengembalikan `StopResize`
+  (permintaan), tidak menaruh order stop; penempatan stop adalah jalur T087 yang dipakai T084.
+  Jadi T070/T071 tetap selesai, dan pasangan berikutnya adalah T086/T087.
+- Urutan kerja baru:
+  - Tahap A (jalur minimum menuju loop Paper pertama T092): T086/T087 (selesai),
+    T070/T071 (selesai), **T072/T073 (berikutnya)**, T079/T080, T091, T093, T092.
+  - Tahap B: setelah T092 jalan, loop Paper beberapa jam; catat bug integrasi, perbaiki dengan
+    commit terpisah (bukan bagian slice task).
+  - Tahap C (sebelum run panjang): T074/T075, T084/T085, T075a/b, T071a/b, T076/T077,
+    T081/T082, T083, T087a, T090.
+  - Tahap D (sebelum ada API key atau Live; kriteria GAGAL di T097): sisa task, checklist
+    risk-execution-security 41 item tercentang operator, review kode Phase 6-8 dengan model kuat,
+    T023 (probe read-only + batas Lite/Pro), role DB non-owner, tail checkpoint audit, T080a/b,
+    T088/T089.
+- Satu pasangan test-lalu-implementasi per sesi; tanpa stub jalur stop.
+- Catatan T087: stop tanpa verdict lolos tanpa gerbang mode (reduce-only), tapi ditolak kalau
+  `quantity > position.quantity`; satu-satunya tulisan stop yang sah adalah `place_protective`
+  (signed_order_id NULL + `is_protective`), dan request yang menyebut pair/venue lain adalah
+  `ValueError` (wiring error, bukan refusal). Stop yang lebih lebar → `STOP_NOT_TIGHTENING`
+  dicatat `REFUSED`; `generation` sama + harga sama → `Accepted(replayed=True)`; stop lama
+  dibatalkan lebih dulu, dan `stop_protection` jadi `NATIVE_ORDER` karena order yang duduk di
+  venue itu yang menjaga. Penempatan stop tidak membaca `venue.profile()` di `__init__`
+  (`OrderWriter(venue_id=...)` opsional) — jalur fill dilarang membacanya (regresi
+  `test_partial_fill.py`). Downgrade 0009 menghapus order `is_protective` (tidak ada verdict di
+  belakangnya) dan gagal keras, bukan melebarkan stop diam-diam, kalau ada stop ≥ harga entry.
 - Catatan T070: `fill` unik per `(venue_id, venue_trade_id)` sehingga laporan duplikat tidak
   menggandakan fill; timer remainder memakai `COALESCE(submitted_at, created_at)` karena `order`
   tidak punya kolom `unfilled_since`; kolom biaya order adalah `fees_paid_idr`/`tax_paid_idr`,
