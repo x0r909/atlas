@@ -116,8 +116,8 @@ Monorepo per [plan.md](./plan.md) § Project Structure: `services/<name>/`, `app
 
 ## Phase 3: Setup gap — CI quality gates for the whole repo
 
-- [ ] T038 [P] Add `tests/conftest.py` shared fixtures (ephemeral Postgres/Redis via compose, fake clock, signed-verdict factory, `SimulatedVenue`) so every later test is one file, not one harness
-- [ ] T039 [P] Add `docs/runbooks/halt.md`, `docs/runbooks/reconcile-mismatch.md`, `docs/runbooks/promotion.md`, and `docs/operator/incident-definitions.md` matching the safety-incident list in FR-061
+- [x] T038 [P] Add `tests/conftest.py` shared fixtures (ephemeral Postgres/Redis via compose, fake clock, signed-verdict factory, `SimulatedVenue`) so every later test is one file, not one harness
+- [x] T039 [P] Add `docs/runbooks/halt.md`, `docs/runbooks/reconcile-mismatch.md`, `docs/runbooks/promotion.md`, and `docs/operator/incident-definitions.md` matching the safety-incident list in FR-061
 
 ---
 
