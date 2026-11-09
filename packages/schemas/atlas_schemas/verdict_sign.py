@@ -155,3 +155,25 @@ def order_signing_payload(order: Mapping[str, Any]) -> dict[str, Any]:
 
 def sign_order(order: Mapping[str, Any], key: str | bytes) -> str:
     return sign(order_signing_payload(order), key)
+
+
+def _order_message(order: Mapping[str, Any], verdict_id: str) -> bytes:
+    """Contract §5: the message is the canonical payload followed by the verdict id.
+
+    Concatenating the id rather than including it in the mapping means an order cannot be
+    re-pointed at another verdict by editing a field: the bytes change at the end.
+    """
+    return canonical_payload(order_signing_payload(order)) + verdict_id.encode("utf-8")
+
+
+def sign_order_with_verdict(
+    order: Mapping[str, Any], verdict_id: str, key: str | bytes
+) -> str:
+    return hmac.new(_key_bytes(key), _order_message(order, verdict_id), hashlib.sha256).hexdigest()
+
+
+def verify_order_with_verdict(
+    order: Mapping[str, Any], verdict_id: str, signature: str, key: str | bytes
+) -> bool:
+    expected = sign_order_with_verdict(order, verdict_id, key)
+    return hmac.compare_digest(expected, signature.lower())

@@ -55,6 +55,11 @@ class SignedOrder(_Model):
     signed_at: datetime
     expires_at: datetime
 
+    @property
+    def is_reduce_only(self) -> bool:
+        """A SELL never opens exposure, so the halt gate must not block it (FR-063)."""
+        return self.side == "SELL"
+
     @model_validator(mode="after")
     def _expiry(self) -> SignedOrder:
         if self.expires_at <= self.signed_at:
