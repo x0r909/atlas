@@ -3,9 +3,12 @@
 Baca file ini dulu; jangan baca spec.md/plan.md/tasks.md utuh. Buka hanya baris task + FR yang dirujuk.
 
 ## Status
-- Terakhir selesai: T067 (commit `391bb88`), T066, T065b, plus `58326f2` (golden biaya).
-- Berikutnya: T068/T069 (order state machine), lalu T070/T071, T072/T073, T074/T075, T075a/b,
-  T071a/b, T076/T077, T078, lalu Phase 8, 9, 5, 10.
+- Terakhir selesai: T068/T069 (order state machine, `state_machine.py`), T067 (`391bb88`), T066,
+  T065b, plus `58326f2` (golden biaya).
+- Berikutnya: T070/T071 (partial fill + sized stop), lalu T072/T073 (UNKNOWN recovery), T074/T075
+  (close escalation), T075a/b, T071a/b, T076/T077, T078, lalu Phase 8, 9, 5, 10.
+- Catatan T069: `UNKNOWN` non-terminal dan guard satu `UNKNOWN` per venue ada di state machine
+  (`VenueFrozen`), bukan di `order` constraint; `FILLED->CANCELED` ditolak dan dicatat `REFUSED`.
 - Gate: `ATLAS_DB_DSN=postgresql://atlas:atlas@localhost:5432/atlas_fix_check .venv/bin/pytest tests -q`
   + `.venv/bin/ruff check .` → wajib 0 failed / 0 skipped. Jangan tampilkan output penuh.
 
