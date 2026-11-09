@@ -57,14 +57,17 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
-export const fetchPositions = () => call<{ positions: Position[] }>("/positions?status=open");
-export const fetchMode = () =>
+export const fetchPositions = (signal?: AbortSignal) =>
+  call<{ positions: Position[] }>("/positions?status=open", { signal });
+export const fetchMode = (signal?: AbortSignal) =>
   call<{ mode: Mode; current: { since_ms: number; reason_code: string }; history: unknown[] }>(
     "/mode",
+    { signal },
   );
-export const fetchBars = (pair: string, tf: string, fromMs: number) =>
+export const fetchBars = (pair: string, tf: string, fromMs: number, signal?: AbortSignal) =>
   call<{ bars: Bar[]; truncated: boolean; age_ms: number | null }>(
     `/market/bars?pair=${pair}&tf=${tf}&from=${fromMs}`,
+    { signal },
   );
 
 /** The kill switch needs no confirmation by design; it must never wait for a modal. */
@@ -72,17 +75,19 @@ export function killSwitch(): Promise<{ mode: Mode }> {
   return call<{ mode: Mode }>("/killswitch", { method: "POST", body: "{}" });
 }
 
+/** One colour per mode, in one place: a chain of ternaries hid BACKTEST inside PAPER. */
+const MODE_BACKGROUND: Record<Mode, string> = {
+  HALTED: "#ff7b72",
+  AUTONOMOUS: "#3fb950",
+  CO_PILOT: "#d29922",
+  PAPER: "#8b949e",
+  BACKTEST: "#8b949e",
+};
+
 export const badgeStyle = (mode: Mode): CSSProperties => ({
   padding: "0.15rem 0.6rem",
   borderRadius: "999px",
   fontWeight: 600,
   color: "#0d1117",
-  background:
-    mode === "HALTED"
-      ? "#ff7b72"
-      : mode === "AUTONOMOUS"
-        ? "#3fb950"
-        : mode === "CO_PILOT"
-          ? "#d29922"
-          : "#8b949e",
+  background: MODE_BACKGROUND[mode],
 });

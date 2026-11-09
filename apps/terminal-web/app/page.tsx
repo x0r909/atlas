@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { PriceChart } from "@/components/PriceChart";
 import {
@@ -37,18 +37,33 @@ export default function DashboardPage() {
   const [error, setError] = useState<string | null>(null);
   const [halting, setHalting] = useState(false);
 
-  const refresh = useCallback(async () => {
+  // A 15 s timer plus a slow gateway used to overlap requests and let an older answer win.
+  // Every refresh takes a ticket; only the newest may write state, and the previous one is
+  // aborted so a hung request cannot keep a stale panel alive.
+  const ticket = useRef(0);
+
+  const refresh = useCallback(async (signal?: AbortSignal) => {
+    const mine = ++ticket.current;
     try {
       const [modeBody, positionsBody, barsBody] = await Promise.all([
-        fetchMode(),
-        fetchPositions(),
-        fetchBars(PAIR, TIMEFRAME, Date.now() - HOURS_OF_BARS * 3600_000),
+        fetchMode(signal),
+        fetchPositions(signal),
+        fetchBars(PAIR, TIMEFRAME, Date.now() - HOURS_OF_BARS * 3600_000, signal),
       ]);
+      if (mine !== ticket.current) {
+        return;
+      }
       setMode(modeBody.mode);
       setPositions(positionsBody.positions);
       setBars(barsBody.bars);
       setError(null);
     } catch (cause) {
+      if (cause instanceof DOMException && cause.name === "AbortError") {
+        return;
+      }
+      if (mine !== ticket.current) {
+        return;
+      }
       setError(
         cause instanceof ApiError ? `${cause.code}: ${cause.message}` : "gateway unreachable",
       );
@@ -56,9 +71,22 @@ export default function DashboardPage() {
   }, []);
 
   useEffect(() => {
-    void refresh();
-    const timer = setInterval(() => void refresh(), 15_000);
-    return () => clearInterval(timer);
+    const controller = new AbortController();
+    const poll = () => {
+      // Nothing to show on a hidden tab, and the terminal should not hammer the gateway.
+      if (document.hidden) {
+        return;
+      }
+      void refresh(controller.signal);
+    };
+    void refresh(controller.signal);
+    const timer = setInterval(poll, 15_000);
+    document.addEventListener("visibilitychange", poll);
+    return () => {
+      controller.abort();
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", poll);
+    };
   }, [refresh]);
 
   const onKill = async () => {
