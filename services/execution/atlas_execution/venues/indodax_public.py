@@ -62,14 +62,14 @@ RESOLUTIONS = {"1m": "1", "5m": "5", "15m": "15", "1h": "60", "4h": "240", "1d":
 INDOdax_PROFILE = VenueProfile(
     venue_id=VENUE_ID,
     version=1,
-    fee_maker_pct=Decimal("0.00000"),
-    # Percent units throughout (the cost model divides by 100): 0.300 is 0.3%.
-    fee_taker_pct=Decimal("0.30000"),
+    fee_maker_pct=Decimal("0.10000"),
+    # Percent units throughout (the cost model divides by 100): 0.200 is 0.2%.
+    fee_taker_pct=Decimal("0.20000"),
     cfx_fee_pct=None,
     cfx_fee_pct_assumed=Decimal("0.10000"),
     tax_buy_pct_assumed=Decimal("0.21000"),
-    tax_pph_pct=Decimal("0.10000"),
-    tax_ppn_pct=Decimal("11.00000"),
+    tax_pph_pct=Decimal("0.21000"),
+    tax_ppn_pct=Decimal("0.00000"),
     tax_applies_to="SELL_ONLY",
     min_notional_idr=Decimal("10000"),
     max_leverage=1,
