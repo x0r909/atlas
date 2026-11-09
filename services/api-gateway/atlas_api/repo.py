@@ -8,6 +8,7 @@ leaking a driver object into a response.
 from __future__ import annotations
 
 import datetime as dt
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -40,6 +41,18 @@ RISK_CONFIG_COUNT: tuple[str, ...] = (
     "llm_monthly_cap_idr",
 )
 RISK_CONFIG_COLUMNS: tuple[str, ...] = RISK_CONFIG_NUMERIC + RISK_CONFIG_COUNT
+
+
+def _flags(value: Any) -> list[str]:
+    """jsonb arrives as text over asyncpg's default codec; a missing value is no flags."""
+    if value is None:
+        return []
+    if not isinstance(value, str):
+        return [str(flag) for flag in value]
+    try:
+        return [str(flag) for flag in json.loads(value)]
+    except ValueError as exc:
+        raise ValueError(f"injection_flags is not valid JSON: {value!r}") from exc
 
 
 def _json_scalar(value: Decimal | int) -> str | int:
@@ -531,9 +544,44 @@ class AsyncpgRepo:
     async def news(
         self, since_ms: int | None, pair: str | None, limit: int
     ) -> list[dict[str, Any]]:
-        # News rows arrive with the news tables in a later phase; an empty list is honest.
-        _ = (since_ms, pair, limit)
-        return []
+        # A duplicate is kept so an operator can see it ran twice, but the feed shows one row
+        # per story: duplicate_of IS NULL is the read-side half of the dedupe contract.
+        clauses = ["duplicate_of IS NULL"]
+        args: list[Any] = []
+        if since_ms is not None:
+            args.append(since_ms)
+            clauses.append(f"fetched_at >= to_timestamp(${len(args)} / 1000.0)")
+        if pair is not None:
+            args.append(pair.removesuffix("IDR"))
+            clauses.append(f"${len(args)} = ANY (tickers)")
+        args.append(limit)
+        query = """
+            SELECT id, source_id, source_name, title, url, language, published_at,
+                   fetched_at, tickers, injection_flags, excluded_from_prompts, duplicate_of
+            FROM news_item
+        """
+        query += " WHERE " + " AND ".join(clauses)
+        query += f" ORDER BY fetched_at DESC LIMIT ${len(args)}"
+        # nosemgrep: python.lang.security.audit.sqli.asyncpg-sqli.asyncpg-sqli
+        # clauses only append $N placeholders; every value travels in args
+        rows = await self._pool.fetch(query, *args)
+        return [
+            {
+                "id": str(row["id"]),
+                "source_id": row["source_id"],
+                "source_name": row["source_name"],
+                "title": row["title"],
+                "url": row["url"],
+                "language": row["language"],
+                "published_at_ms": _ms(row["published_at"]) if row["published_at"] else None,
+                "fetched_at_ms": _ms(row["fetched_at"]),
+                "tickers": list(row["tickers"]),
+                "injection_flags": _flags(row["injection_flags"]),
+                "excluded_from_prompts": bool(row["excluded_from_prompts"]),
+                "duplicate_of": str(row["duplicate_of"]) if row["duplicate_of"] else None,
+            }
+            for row in rows
+        ]
 
     async def audit(
         self, from_ms: int | None, to_ms: int | None, record_type: str | None

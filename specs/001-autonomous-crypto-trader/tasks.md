@@ -134,15 +134,15 @@ Monorepo per [plan.md](./plan.md) § Project Structure: `services/<name>/`, `app
 
 **Independent Test**: with the network stubbed, ≥3 feeds ingest into `news_item`, duplicates collapse, an instruction-like item is flagged but stored, and a downstream consumer can read a 24 h window without hitting a feed.
 
-- [ ] T042 [P] [US3] Write `services/ingest-news/atlas_news/feeds.py` with the allowlist from research R3 (CoinDesk, Cointelegraph, Decrypt, The Block, Bitcoin Magazine, CryptoSlate, Coinvestasi, OJK/Bappebti releases), per-feed `expected_interval_s`, ETag/Last-Modified caching, and **no** paid vendor path (FR-052)
-- [ ] T043 [P] [US3] Write `tests/unit/test_news_dedupe.py` failing first: canonical URL normalization + title SimHash within 24 h collapses a syndicated story into one row with `duplicate_of` set
-- [ ] T044 [US3] Implement `services/ingest-news/atlas_news/dedupe.py` to pass T043, plus the 24 h window query used by the UI and agents
-- [ ] T045 [P] [US3] Write `tests/unit/test_news_injection_screen.py` failing first: items containing imperative trading instructions ("buy now", "ignore previous instructions", "transfer funds", a prompt-injection tag of the form `system` in angle brackets) are flagged `injection_suspected=true`, still stored, and excluded from any text block handed to a model (FR-010, FR-012, constitution VI)
-- [ ] T046 [US3] Implement `services/ingest-news/atlas_news/injection.py` to pass T045, with the pattern list in one module and a versioned `screen_version` recorded per item
-- [ ] T047 [US3] Implement `services/ingest-news/atlas_news/worker.py`: poll → parse → dedupe → screen → insert `news_item` → publish `atlas:news.raw`; a single dead feed degrades to `data_health=STALE` for that source and never stops the loop (FR-011)
-- [ ] T048 [US3] Extend `services/feature-engine/atlas_features/news.py` to publish `atlas:news.enriched` with recency and relevance fields, deliberately **without** embeddings (pgvector tables are deferred to M6 per plan.md Complexity Tracking)
-- [ ] T049 [P] [US3] Write `tests/integration/test_news_pipeline.py`: three stubbed feeds, one flapping, assert bounded runtime (< 60 s), dedupe across feeds, `injection_suspected` persisted, and a `STALE` health row for the flapping feed
-- [ ] T050 [US3] Add `GET /news` (window filter, injection flag visible) to `services/api-gateway/atlas_api/routes/news.py` and a news panel in `apps/terminal-web/src/app/(dashboard)/news/page.tsx` that renders flagged items with a warning badge, never as instructions
+- [x] T042 [P] [US3] Write `services/ingest-news/atlas_news/feeds.py` with the allowlist from research R3 (CoinDesk, Cointelegraph, Decrypt, The Block, Bitcoin Magazine, CryptoSlate, Coinvestasi, OJK/Bappebti releases), per-feed `expected_interval_s`, ETag/Last-Modified caching, and **no** paid vendor path (FR-052)
+- [x] T043 [P] [US3] Write `tests/unit/test_news_dedupe.py` failing first: canonical URL normalization + title SimHash within 24 h collapses a syndicated story into one row with `duplicate_of` set
+- [x] T044 [US3] Implement `services/ingest-news/atlas_news/dedupe.py` to pass T043, plus the 24 h window query used by the UI and agents
+- [x] T045 [P] [US3] Write `tests/unit/test_news_injection_screen.py` failing first: items containing imperative trading instructions ("buy now", "ignore previous instructions", "transfer funds", a prompt-injection tag of the form `system` in angle brackets) are flagged `injection_suspected=true`, still stored, and excluded from any text block handed to a model (FR-010, FR-012, constitution VI)
+- [x] T046 [US3] Implement `services/ingest-news/atlas_news/injection.py` to pass T045, with the pattern list in one module and a versioned `screen_version` recorded per item
+- [x] T047 [US3] Implement `services/ingest-news/atlas_news/worker.py`: poll → parse → dedupe → screen → insert `news_item` → publish `atlas:news.raw`; a single dead feed degrades to `data_health=STALE` for that source and never stops the loop (FR-011)
+- [x] T048 [US3] Extend `services/feature-engine/atlas_features/news.py` to publish `atlas:news.enriched` with recency and relevance fields, deliberately **without** embeddings (pgvector tables are deferred to M6 per plan.md Complexity Tracking)
+- [x] T049 [P] [US3] Write `tests/integration/test_news_pipeline.py`: three stubbed feeds, one flapping, assert bounded runtime (< 60 s), dedupe across feeds, `injection_suspected` persisted, and a `STALE` health row for the flapping feed
+- [x] T050 [US3] Add `GET /news` (window filter, injection flag visible) to `services/api-gateway/atlas_api/routes/news.py` and a news panel in `apps/terminal-web/src/app/(dashboard)/news/page.tsx` that renders flagged items with a warning badge, never as instructions
 
 **Checkpoint (M2)**: news is flowing, deduped, screened, and visible; no model has seen it yet (agents are M4).
 

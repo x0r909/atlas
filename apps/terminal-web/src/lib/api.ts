@@ -26,6 +26,22 @@ export interface Bar {
   volume: string;
 }
 
+export interface NewsItem {
+  id: string;
+  source_id: string;
+  source_name: string;
+  title: string;
+  url: string;
+  language: "id" | "en";
+  published_at_ms: number | null;
+  fetched_at_ms: number;
+  tickers: string[];
+  /** Rule ids from the injection screen; a non-empty list means the agent never sees it. */
+  injection_flags: string[];
+  excluded_from_prompts: boolean;
+  duplicate_of: string | null;
+}
+
 export const API_BASE = process.env.NEXT_PUBLIC_ATLAS_API ?? "";
 
 export class ApiError extends Error {
@@ -64,6 +80,9 @@ export const fetchMode = (signal?: AbortSignal) =>
     "/mode",
     { signal },
   );
+export const fetchNews = (sinceMs: number, signal?: AbortSignal) =>
+  call<{ items: NewsItem[] }>(`/news?since=${sinceMs}`, { signal });
+
 export const fetchBars = (pair: string, tf: string, fromMs: number, signal?: AbortSignal) =>
   call<{ bars: Bar[]; truncated: boolean; age_ms: number | null }>(
     `/market/bars?pair=${pair}&tf=${tf}&from=${fromMs}`,
