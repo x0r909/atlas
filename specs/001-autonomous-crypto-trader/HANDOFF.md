@@ -3,10 +3,20 @@
 Baca file ini dulu; jangan baca spec.md/plan.md/tasks.md utuh. Buka hanya baris task + FR yang dirujuk.
 
 ## Status
-- Terakhir selesai: T068/T069 (order state machine, `state_machine.py`), T067 (`391bb88`), T066,
-  T065b, plus `58326f2` (golden biaya).
-- Berikutnya: T070/T071 (partial fill + sized stop), lalu T072/T073 (UNKNOWN recovery), T074/T075
-  (close escalation), T075a/b, T071a/b, T076/T077, T078, lalu Phase 8, 9, 5, 10.
+- Terakhir selesai: T070/T071 (partial fill + sized stop, `1979ae7`: `fills.py`,
+  `position_sync.py`, `state_machine.py` fee columns, `tests/integration/test_partial_fill.py`),
+  T068/T069 (`state_machine.py`), T067 (`391bb88`), T066, T065b, plus `58326f2` (golden biaya).
+- Berikutnya: T071a/T071b sengaja ditunda sampai T075/T075a/T075b ada (mereka pemilik jalur close
+  reduce-only); jadi urutannya T072/T073 (UNKNOWN recovery), T074/T075 (close escalation), T075a/b,
+  T071a/b, T076/T077, T078, lalu Phase 8, 9, 5, 10.
+- Catatan T070: `fill` unik per `(venue_id, venue_trade_id)` sehingga laporan duplikat tidak
+  menggandakan fill; timer remainder memakai `COALESCE(submitted_at, created_at)` karena `order`
+  tidak punya kolom `unfilled_since`; kolom biaya order adalah `fees_paid_idr`/`tax_paid_idr`,
+  posisi `fees_idr`/`taxes_idr`; `position` tidak punya `updated_at`.
+- Catatan lingkungan: DB dev `atlas` sempat tertinggal di migrasi `0005` (sudah `upgrade head`) dan
+  trigger append-only `audit_record` hilang (sudah dipulihkan manual dari `0004_audit.py`). DB
+  `atlas_fix_check` bersih. `mode_state` di DB dev tidak punya `seq`/`actor_ref`, jadi dua test
+  `test_order_verdict_gate.py` gagal di situ; di DB gate lulus.
 - Catatan T069: `UNKNOWN` non-terminal dan guard satu `UNKNOWN` per venue ada di state machine
   (`VenueFrozen`), bukan di `order` constraint; `FILLED->CANCELED` ditolak dan dicatat `REFUSED`.
 - Gate: `ATLAS_DB_DSN=postgresql://atlas:atlas@localhost:5432/atlas_fix_check .venv/bin/pytest tests -q`
