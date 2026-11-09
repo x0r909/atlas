@@ -437,6 +437,32 @@ evidence); third-party backtest frameworks (fees/tax models do not match Indones
 
 ---
 
+## R17. The runtime database identity is part of the safety argument
+
+Append-only tables in this system are defended by triggers, not by grants: `audit_record`,
+`mode_state` and the rest refuse `UPDATE`, `DELETE` and `TRUNCATE` from every caller. A
+trigger, however, can be switched off by the table owner — `ALTER TABLE ... DISABLE TRIGGER
+USER` — and by a superuser. Grant-level defence has the same shape from the other side: the
+`REVOKE` in migration `0004_audit` is only meaningful for a role that is not the owner,
+because ownership implies every privilege.
+
+So the guarantees survive only if the application connects as a non-owner identity whose
+rights are exactly `SELECT` + `INSERT` (`USAGE, SELECT` on the sequences). No grant can
+express "may not alter": Postgres has no `ALTER` privilege to withhold — ownership is the
+thing that unlocks DDL, which is why the role must not own anything.
+
+Pre-Live requirement (blocks promotion, checked in `T097`):
+
+* the API gateway and every worker connect as a dedicated role, e.g. `atlas_app_runtime`;
+* that role owns no table, sequence or schema, and holds no `TRIGGER`, `REFERENCES` or DDL
+  grant;
+* migrations run as a separate owner role, never as the runtime role;
+* `tests/integration/test_db_role_privileges.py` proves both halves: the runtime role can
+  append, cannot disable or drop the trigger, and cannot rewrite history; and the owner
+  connection *can* disable the trigger, which is why it must not be the runtime identity.
+
+Until this is in place the system is one `psql` session away from a rewritten audit log.
+
 ## Open items that remain, and where they are resolved
 
 | Item | Blocking | Resolved by |
