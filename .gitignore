@@ -66,3 +66,6 @@ tmp/
 .pi/state/
 .pi/auth*
 .atl/
+
+# Local DSN handoff files: a password never belongs in the tree.
+infra/db/*.local

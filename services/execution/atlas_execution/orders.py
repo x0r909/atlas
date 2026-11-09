@@ -65,20 +65,30 @@ class Cancelled:
     order_id: UUID
     status: OrderStatus
     replaced_by: str | None = None
+    unfilled_since: str | None = None
 
 
 _UPDATE_STATUS = """
 UPDATE "order"
    SET status = $2,
        venue_order_id = COALESCE($3, venue_order_id),
+       remainder_action = COALESCE($4::remainder_action, remainder_action),
        updated_at = now()
  WHERE id = $1
 """
 
 _READ_ORDER = """
-SELECT id, client_order_id, venue_id, pair, side, type, quantity, limit_price, stop_price,
-       status, is_reduce_only
+SELECT id, client_order_id, venue_order_id, venue_id, pair, side, type, quantity,
+       limit_price, status,
+       COALESCE(submitted_at, created_at) AS unfilled_since
   FROM "order"
+ WHERE id = $1
+"""
+
+_UPDATE_POSITION_LINK = """
+UPDATE "order"
+   SET position_id = $2,
+       updated_at = now()
  WHERE id = $1
 """
 
@@ -121,7 +131,7 @@ class OrderWriter:
             ack: VenueOrderAck = await self._venue.place_order(request)
         except VenueRejected as rejected:
             status: OrderStatus = "REJECTED"
-            await session.execute(_UPDATE_STATUS, order_id, status, None)
+            await session.execute(_UPDATE_STATUS, order_id, status, None, None)
             await self._record(
                 order_id,
                 "REJECTED",
@@ -130,7 +140,7 @@ class OrderWriter:
                 message=rejected.message,
             )
             return Placed(order_id, order.client_order_id, status, None)
-        await session.execute(_UPDATE_STATUS, order_id, "OPEN", ack.venue_order_id)
+        await session.execute(_UPDATE_STATUS, order_id, "OPEN", ack.venue_order_id, None)
         await self._record(order_id, "OPEN", correlation_id, venue_order_id=ack.venue_order_id)
         return Placed(order_id, order.client_order_id, "OPEN", ack.venue_order_id)
 
@@ -141,19 +151,38 @@ class OrderWriter:
         correlation_id: str,
         reason: str,
         verdict_expires_at: datetime | None,
+        remainder_action: str | None = None,
     ) -> Cancelled:
         """Cancel one order. An entry may only be cancelled while its verdict is still live."""
         session = self._session
         row = await session.fetchrow(_READ_ORDER, order_id)
         if row is None:
             raise Refused("VERDICT_UNKNOWN_ID", f"no order {order_id}")
+        since = row["unfilled_since"]
         expired = verdict_expires_at is None or verdict_expires_at <= self._now()
-        if not row["is_reduce_only"] and expired:
+        reduce_only = str(row["side"]) == "SELL"
+        if not reduce_only and expired:
             raise Refused("VERDICT_EXPIRED", "an entry may not be cancelled on an expired verdict")
-        await self._venue.cancel_order(row["pair"], row["client_order_id"])
-        await session.execute(_UPDATE_STATUS, order_id, "CANCELED", None)
+        if row["venue_order_id"] is None:
+            # The refusal codes are the contract's verdict vocabulary (atlas_schemas.order);
+            # an unacknowledged order is an internal invariant break, not a verdict refusal.
+            raise RuntimeError(f"order {order_id} has no venue_order_id to cancel")
+        await self._venue.cancel_order(str(row["pair"]), str(row["venue_order_id"]))
+        await session.execute(_UPDATE_STATUS, order_id, "CANCELED", None, remainder_action)
         await self._record(order_id, "CANCELED", correlation_id, reason=reason)
-        return Cancelled(order_id, "CANCELED")
+        return Cancelled(order_id, "CANCELED", unfilled_since=str(since) if since else None)
+
+    async def attach_position(
+        self, order_id: UUID, position_id: UUID, *, correlation_id: str
+    ) -> None:
+        """Record which position an order opened. Bookkeeping, audited like any other write."""
+        await self._session.execute(_UPDATE_POSITION_LINK, order_id, position_id)
+        await self._record(
+            order_id,
+            "POSITION_LINKED",
+            correlation_id,
+            position_id=str(position_id),
+        )
 
     async def modify(
         self,

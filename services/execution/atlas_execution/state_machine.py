@@ -11,6 +11,10 @@ name both ends instead of describing an if-tree. Two states need special care:
 
 `FILLED -> CANCELED` in particular is refused rather than treated as a correction: a fill is
 an executed trade, and cancelling the row would make the position disagree with the ledger.
+
+`PARTIALLY_FILLED -> PARTIALLY_FILLED` is the one legal self-loop: a second partial fill moves
+nothing in the graph but must still accumulate quantity and be audited, so it is expressed as
+the same move rather than as a second write path for `filled_quantity`.
 """
 
 from __future__ import annotations
@@ -53,7 +57,7 @@ LEGAL_TRANSITIONS: Mapping[OrderState, frozenset[OrderState]] = {
         }
     ),
     OrderState.PARTIALLY_FILLED: frozenset(
-        {OrderState.FILLED, OrderState.CANCELED, OrderState.UNKNOWN}
+        {OrderState.FILLED, OrderState.PARTIALLY_FILLED, OrderState.CANCELED, OrderState.UNKNOWN}
     ),
     OrderState.UNKNOWN: frozenset(
         {
@@ -97,6 +101,10 @@ _UPDATE_STATUS = """
 UPDATE "order"
    SET status = $2::order_status,
        filled_quantity = COALESCE($3, filled_quantity),
+       avg_fill_price = COALESCE($4, avg_fill_price),
+       fees_paid_idr = fees_paid_idr + COALESCE($5, 0),
+       tax_paid_idr = tax_paid_idr + COALESCE($6, 0),
+       remainder_action = COALESCE($7::remainder_action, remainder_action),
        unknown_since = CASE
            WHEN $2::order_status = 'UNKNOWN' THEN now()
            ELSE NULL
@@ -178,6 +186,10 @@ class OrderStateMachine:
         *,
         correlation_id: str,
         filled_quantity: Decimal | None = None,
+        avg_fill_price: Decimal | None = None,
+        fee_idr: Decimal | None = None,
+        tax_idr: Decimal | None = None,
+        remainder_action: str | None = None,
     ) -> Transition:
         target = OrderState(to)
         row = await session.fetchrow(_READ_ORDER, order_id)
@@ -217,7 +229,16 @@ class OrderStateMachine:
                 )
                 raise VenueFrozen(venue_id, blocking)
 
-        await session.execute(_UPDATE_STATUS, order_id, str(target), filled_quantity)
+        await session.execute(
+            _UPDATE_STATUS,
+            order_id,
+            str(target),
+            filled_quantity,
+            avg_fill_price,
+            fee_idr,
+            tax_idr,
+            remainder_action,
+        )
         await self._record(
             session,
             order_id,
@@ -227,6 +248,11 @@ class OrderStateMachine:
             from_status=str(source),
             to_status=str(target),
             correlation_id=correlation_id,
+            filled_quantity=filled_quantity,
+            avg_fill_price=avg_fill_price,
+            fee_idr=fee_idr,
+            tax_idr=tax_idr,
+            remainder_action=remainder_action,
         )
         return Transition(order_id, venue_id, source, target)
 
