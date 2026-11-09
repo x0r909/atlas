@@ -23,6 +23,7 @@ from typing import Any, Literal
 
 import httpx
 from atlas_common.ratelimit import RateLimiter, RateLimitExceeded
+from atlas_execution.venues import indodax_facts
 from atlas_schemas.events import EventEnvelope
 from atlas_schemas.venue import (
     Balance,
@@ -62,16 +63,16 @@ RESOLUTIONS = {"1m": "1", "5m": "5", "15m": "15", "1h": "60", "4h": "240", "1d":
 INDOdax_PROFILE = VenueProfile(
     venue_id=VENUE_ID,
     version=1,
-    fee_maker_pct=Decimal("0.10000"),
+    fee_maker_pct=indodax_facts.FEE_MAKER_PCT,
     # Percent units throughout (the cost model divides by 100): 0.200 is 0.2%.
-    fee_taker_pct=Decimal("0.20000"),
-    cfx_fee_pct=None,
-    cfx_fee_pct_assumed=Decimal("0.10000"),
-    tax_buy_pct_assumed=Decimal("0.21000"),
-    tax_pph_pct=Decimal("0.21000"),
-    tax_ppn_pct=Decimal("0.00000"),
-    tax_applies_to="SELL_ONLY",
-    min_notional_idr=Decimal("10000"),
+    fee_taker_pct=indodax_facts.FEE_TAKER_PCT,
+    cfx_fee_pct=indodax_facts.CFX_FEE_PCT,
+    cfx_fee_pct_assumed=indodax_facts.CFX_FEE_PCT_ASSUMED,
+    tax_buy_pct_assumed=indodax_facts.TAX_BUY_PCT_ASSUMED,
+    tax_pph_pct=indodax_facts.TAX_PPH_PCT,
+    tax_ppn_pct=indodax_facts.TAX_PPN_PCT,
+    tax_applies_to=indodax_facts.TAX_APPLIES_TO,
+    min_notional_idr=indodax_facts.MIN_NOTIONAL_IDR,
     max_leverage=1,
     native_stop_orders=False,
     cost_model_version="1",
