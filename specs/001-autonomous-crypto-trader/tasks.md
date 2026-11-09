@@ -123,8 +123,8 @@ Monorepo per [plan.md](./plan.md) § Project Structure: `services/<name>/`, `app
 
 ## Phase 4: M1 completion — market-data correctness that M3 depends on
 
-- [ ] T040 [US1] Implement `services/feature-engine/atlas_features/staleness.py`: exponential-moving σ of 1-minute returns per pair, spread ratio vs the 24 h median, and a `Freshness` verdict object consumed by the Risk Engine, with `tests/unit/test_staleness.py` pinning 5σ and 3× to the spec's numbers (FR-027, FR-065)
-- [ ] T041 [US1] Implement the order-book walk + expected-price model in `packages/common/atlas_common/slippage.py` (`expected_price` from depth, `deviation_pct`) with `tests/unit/test_slippage.py` on recorded books, since FR-032's guard and FR-058's cost model both read it
+- [x] T040 [US1] Implement `services/feature-engine/atlas_features/staleness.py`: exponential-moving σ of 1-minute returns per pair, spread ratio vs the 24 h median, and a `Freshness` verdict object consumed by the Risk Engine, with `tests/unit/test_staleness.py` pinning 5σ and 3× to the spec's numbers (FR-027, FR-065)
+- [x] T041 [US1] Implement the order-book walk + expected-price model in `packages/common/atlas_common/slippage.py` (`expected_price` from depth, `deviation_pct`) with `tests/unit/test_slippage.py` on recorded books, since FR-032's guard and FR-058's cost model both read it
 
 ---
 
