@@ -30,13 +30,15 @@ ProtectiveStopRefusal = Literal[
     "QUANTITY_EXCEEDS_POSITION",
     "STOP_NOT_TIGHTENING",
     "STALE_GENERATION",
+    "STOP_ABOVE_MARKET",
     "PROTECTIVE_STOP_NOT_PLACED",
 ]
 
 
 @dataclass(frozen=True, slots=True)
 class Accepted:
-    order_id: UUID
+    # A locally armed stop has no order row, so it has no id.
+    order_id: UUID | None
     client_order_id: str
     replayed: bool = False
 
@@ -48,6 +50,8 @@ class Rejected:
 
 
 class StopWriter(Protocol):
+    def native_stop_orders(self) -> bool: ...
+
     async def cancel(
         self,
         order_id: UUID,
@@ -71,6 +75,7 @@ class StopWriter(Protocol):
 
 class Session(Protocol):
     async def fetchrow(self, query: str, *args: Any) -> Mapping[str, Any] | None: ...
+    async def fetchval(self, query: str, *args: Any) -> Any: ...
     async def execute(self, query: str, *args: Any) -> Any: ...
 
 
@@ -112,6 +117,8 @@ UPDATE "order" SET status = 'CANCELED', updated_at = now() WHERE id = $1
 """
 
 _MODE_HEAD = "SELECT mode, seq FROM mode_state ORDER BY seq DESC LIMIT 1"
+
+_LAST_PRICE = "SELECT last FROM quote_snapshot WHERE venue_id = $1 AND pair = $2"
 
 _HALT = """
 INSERT INTO mode_state (mode, previous_mode, reason_code, actor)
@@ -175,6 +182,16 @@ class StopAcceptance:
                 and Decimal(live["limit_price"]) == request.stop_price
             ):
                 return Accepted(live["id"], str(live["client_order_id"]), replayed=True)
+            if (
+                live is None
+                and int(request.generation) == int(position["stop_generation"])
+                and Decimal(position["stop_price"]) == request.stop_price
+            ):
+                return Accepted(
+                    None,
+                    f"atlas-stop-{str(request.position_id)[:8]}-{request.generation}",
+                    replayed=True,
+                )
             return Rejected(
                 "STALE_GENERATION",
                 f"generation {request.generation} does not advance {position['stop_generation']}",
@@ -200,6 +217,30 @@ class StopAcceptance:
                 f"stop {request.stop_price} is wider than the recorded {position['stop_price']}",
             )
 
+        last_price = await session.fetchval(
+            _LAST_PRICE, position["venue_id"], position["pair"]
+        )
+        if last_price is not None and request.stop_price >= Decimal(last_price):
+            await self._audit.append(
+                session,
+                "ORDER",
+                {
+                    "position_id": str(request.position_id),
+                    "request_id": str(request.request_id),
+                    "status": "REFUSED",
+                    "refusal": "STOP_ABOVE_MARKET",
+                    "requested_stop_price": str(request.stop_price),
+                    "last_price": str(last_price),
+                    "correlation_id": correlation_id,
+                },
+            )
+            return Rejected(
+                "STOP_ABOVE_MARKET",
+                f"stop {request.stop_price} is at or above the last price {last_price}",
+            )
+
+        client_order_id = f"atlas-stop-{str(request.position_id)[:8]}-{request.generation}"
+
         if live is not None:
             # Cancel first: while both rest, the pair could sell twice the quantity held.
             await self._writer.cancel(
@@ -210,7 +251,32 @@ class StopAcceptance:
             )
             await session.execute(_CANCEL_LIVE_STOP, live["id"])
 
-        client_order_id = f"atlas-stop-{str(request.position_id)[:8]}-{request.generation}"
+        if not self._writer.native_stop_orders():
+            # Indodax has no native stop: a SELL LIMIT at the stop price would rest *below* the
+            # market and fill on arrival. Arm it locally; the monitor enforces it.
+            await session.execute(
+                _SET_STOP,
+                request.position_id,
+                request.stop_price,
+                None,
+                "MONITORED",
+                request.generation,
+            )
+            await self._audit.append(
+                session,
+                "ORDER",
+                {
+                    "position_id": str(request.position_id),
+                    "request_id": str(request.request_id),
+                    "status": "ARMED",
+                    "stop_protection": "MONITORED",
+                    "stop_price": str(request.stop_price),
+                    "generation": int(request.generation),
+                    "correlation_id": correlation_id,
+                },
+            )
+            return Accepted(None, client_order_id)
+
         try:
             placed = await self._writer.place_protective(
                 position_id=request.position_id,

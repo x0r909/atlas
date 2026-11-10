@@ -172,6 +172,7 @@ class Seed:
     async def teardown(self) -> None:
         async with self.pool.acquire() as session, session.transaction():
             # Positions first: position.stop_order_id references the order it protects.
+            await session.execute("DELETE FROM quote_snapshot WHERE venue_id = $1", self.venue)
             await session.execute("DELETE FROM position WHERE venue_id = $1", self.venue)
             await session.execute('DELETE FROM "order" WHERE venue_id = $1', self.venue)
             await session.execute(
@@ -277,7 +278,7 @@ async def _position_row(conn: Any, seed: Seed) -> Mapping[str, Any]:
 
 async def test_a_missing_stop_is_placed_in_one_cycle(pool: asyncpg.Pool, seeds: list[Seed]) -> None:
     seed = await _seed(pool, seeds)
-    venue = StopVenue(venue_id=seed.venue)
+    venue = StopVenue(venue_id=seed.venue, native_stop_orders=True)
 
     outcomes = await _monitor_cycle(pool, seed, venue)
 
@@ -302,7 +303,7 @@ async def test_a_live_stop_is_cancelled_before_the_tighter_one_is_placed(
     pool: asyncpg.Pool, seeds: list[Seed]
 ) -> None:
     seed = await _seed(pool, seeds)
-    venue = StopVenue(venue_id=seed.venue)
+    venue = StopVenue(venue_id=seed.venue, native_stop_orders=True)
 
     async with pool.acquire() as conn, conn.transaction():
         previous = await conn.fetchval(
@@ -315,7 +316,8 @@ async def test_a_live_stop_is_cancelled_before_the_tighter_one_is_placed(
             Decimal("950"),
         )
         await conn.execute(
-            "UPDATE position SET stop_order_id = $2, stop_generation = 1 WHERE id = $1",
+            "UPDATE position SET stop_order_id = $2, stop_generation = 1"
+            " WHERE id = $1",
             seed.position_id,
             previous,
         )
@@ -421,7 +423,7 @@ async def test_an_adopted_position_without_a_stop_forces_halted_when_placement_f
     pool: asyncpg.Pool, seeds: list[Seed]
 ) -> None:
     seed = await _seed(pool, seeds, adopted=True)
-    venue = StopVenue(venue_id=seed.venue)
+    venue = StopVenue(venue_id=seed.venue, native_stop_orders=True)
     venue.fail_with = "unavailable"
 
     async with pool.acquire() as conn, conn.transaction():
@@ -444,3 +446,69 @@ async def test_an_adopted_position_without_a_stop_forces_halted_when_placement_f
         "SEV1",
         "HALTED",
     )
+
+
+async def test_a_venue_without_native_stops_arms_a_monitored_stop_and_sends_nothing(
+    pool: asyncpg.Pool, seeds: list[Seed]
+) -> None:
+    """Indodax has no native stop order. A SELL LIMIT at the stop price would rest *below* the
+    market and be marketable, so the stop is armed locally and the monitor enforces it."""
+    seed = await _seed(pool, seeds)
+    venue = StopVenue(venue_id=seed.venue, native_stop_orders=False)
+
+    async with pool.acquire() as conn, conn.transaction():
+        outcome = await _service(conn, seed, venue).accept(
+            _request(seed, generation=1), correlation_id="arm"
+        )
+
+    assert isinstance(outcome, Accepted)
+    assert outcome.order_id is None
+    assert venue.placed == [] and venue.cancelled == []
+    async with pool.acquire() as conn:
+        position = await _position_row(conn, seed)
+        stops = await conn.fetchval(
+            'SELECT count(*) FROM "order" WHERE position_id = $1', seed.position_id
+        )
+    assert position["stop_protection"] == "MONITORED"
+    assert position["stop_order_id"] is None
+    assert position["stop_price"] == Decimal("950")
+    assert position["stop_generation"] == 1
+    assert stops == 0
+
+    async with pool.acquire() as conn, conn.transaction():
+        replay = await _service(conn, seed, venue).accept(
+            _request(seed, generation=1), correlation_id="arm"
+        )
+    assert isinstance(replay, Accepted) and replay.replayed
+    assert venue.placed == []
+
+
+async def test_a_stop_at_or_above_the_last_price_is_refused(
+    pool: asyncpg.Pool, seeds: list[Seed]
+) -> None:
+    """A stop above the market would have to sell at a price nobody bids, so it protects
+    nothing; accepting it would only make the position look covered."""
+    seed = await _seed(pool, seeds)
+    venue = StopVenue(venue_id=seed.venue, native_stop_orders=True)
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute(
+            "INSERT INTO quote_snapshot (venue_id, pair, bid, ask, last, bid_size, ask_size)"
+            " VALUES ($1, 'BTCIDR', 999, 1001, 1000, 1, 1)",
+            seed.venue,
+        )
+
+    async with pool.acquire() as conn, conn.transaction():
+        outcome = await _service(conn, seed, venue).accept(
+            _request(seed, generation=1, stop_price="1000"), correlation_id="above-market"
+        )
+
+    assert isinstance(outcome, Rejected)
+    assert outcome.code == "STOP_ABOVE_MARKET"
+    assert venue.placed == [] and venue.cancelled == []
+    async with pool.acquire() as conn:
+        position = await _position_row(conn, seed)
+        quote = await conn.fetchval(
+            "SELECT count(*) FROM quote_snapshot WHERE venue_id = $1", seed.venue
+        )
+    assert position["stop_price"] == Decimal("950")
+    assert quote == 1

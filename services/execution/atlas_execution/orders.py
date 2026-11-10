@@ -121,6 +121,10 @@ class OrderWriter:
         self._audit = audit
         self._clock = clock
 
+    def native_stop_orders(self) -> bool:
+        """Whether the venue enforces a stop itself. Read lazily, never in ``__init__``."""
+        return bool(self._venue.profile().native_stop_orders)
+
     async def place(
         self,
         order: SignedOrder,
