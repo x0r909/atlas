@@ -316,8 +316,7 @@ async def test_a_live_stop_is_cancelled_before_the_tighter_one_is_placed(
             Decimal("950"),
         )
         await conn.execute(
-            "UPDATE position SET stop_order_id = $2, stop_generation = 1"
-            " WHERE id = $1",
+            "UPDATE position SET stop_order_id = $2, stop_generation = 1 WHERE id = $1",
             seed.position_id,
             previous,
         )

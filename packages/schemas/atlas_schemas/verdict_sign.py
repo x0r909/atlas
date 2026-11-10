@@ -166,9 +166,7 @@ def _order_message(order: Mapping[str, Any], verdict_id: str) -> bytes:
     return canonical_payload(order_signing_payload(order)) + verdict_id.encode("utf-8")
 
 
-def sign_order_with_verdict(
-    order: Mapping[str, Any], verdict_id: str, key: str | bytes
-) -> str:
+def sign_order_with_verdict(order: Mapping[str, Any], verdict_id: str, key: str | bytes) -> str:
     return hmac.new(_key_bytes(key), _order_message(order, verdict_id), hashlib.sha256).hexdigest()
 
 

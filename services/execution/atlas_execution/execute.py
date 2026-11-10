@@ -217,9 +217,7 @@ class StopAcceptance:
                 f"stop {request.stop_price} is wider than the recorded {position['stop_price']}",
             )
 
-        last_price = await session.fetchval(
-            _LAST_PRICE, position["venue_id"], position["pair"]
-        )
+        last_price = await session.fetchval(_LAST_PRICE, position["venue_id"], position["pair"])
         if last_price is not None and request.stop_price >= Decimal(last_price):
             await self._audit.append(
                 session,
